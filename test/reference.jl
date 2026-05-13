@@ -22,7 +22,7 @@ function stencil_reference(
     I = Int[]; J = Int[]; V = T[]
     for (j, c_idx) in enumerate(col_cri)
         for k in 1:K
-            r_idx = c_idx + offsets[k]
+            r_idx = c_idx - offsets[k]
             i = get(row_lookup, r_idx, 0)
             if i != 0
                 push!(I, i); push!(J, j); push!(V, coefs[k])
