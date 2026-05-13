@@ -20,4 +20,4 @@ include("reference.jl")
     end
 end
 
-include("test_x_diff.jl")
+include("test_stencil.jl")

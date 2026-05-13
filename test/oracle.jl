@@ -4,6 +4,7 @@
 using CartesianRuns
 using SparseArrays
 using Random
+using CartesianOperators
 
 const CRI = CartesianRunIndices
 
@@ -52,5 +53,18 @@ C1 = stencil_naive_x(dom, (1, -1), (1.0, -1.0), row, col)
 C2 = stencil_reference((CartesianIndex(1), CartesianIndex(-1)), (1.0, -1.0), row, col)
 
 @show C1 == C2
+
+# assemble + update! cross-check against the naive oracle
+st_f = LinearStencil{1}((1,  0), (1.0, -1.0))
+st_b = LinearStencil{1}((0, -1), (1.0, -1.0))
+st_c = LinearStencil{1}((1, -1), (1.0, -1.0))
+
+F3 = assemble(st_f, row, col); update!(F3, st_f, row, col)
+B3 = assemble(st_b, row, col); update!(B3, st_b, row, col)
+C3 = assemble(st_c, row, col); update!(C3, st_c, row, col)
+
+@show F1 == F3
+@show B1 == B3
+@show C1 == C3
 
 nothing
