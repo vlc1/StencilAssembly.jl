@@ -1,6 +1,10 @@
 using CartesianOperators
+using CartesianRuns
+using SparseArrays
 using Test
 
 @testset "CartesianOperators.jl" begin
-    # Write your tests here.
+    @testset "smoke" begin
+        @test isdefined(CartesianOperators, :CartesianOperators)
+    end
 end
