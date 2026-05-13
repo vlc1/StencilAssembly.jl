@@ -19,6 +19,7 @@ constant-size buffer.
 | `src/x_diff.jl`               | x-direction difference kernels and wrappers       |
 | `test/runtests.jl`            | Test suite entry (run via `Pkg.test()`)           |
 | `test/reference.jl`           | Brute-force `stencil_reference` helper            |
+| `test/oracle.jl`              | `spdiagm`-based naive cross-check oracle          |
 | `test/test_x_diff.jl`         | x-diff test sets                                  |
 
 ## Sticky decisions (do not re-litigate)
@@ -34,6 +35,22 @@ constant-size buffer.
 
 Stencil offset → column outside `col_cri` ⇒ that single `(row, col)` entry is
 dropped. Rows are sourced from `row_cri` so off-mask rows are never emitted.
+
+### CartesianRunIndices surface we depend on
+
+`CartesianRunIndices` is treated as a minimal value carrying only:
+
+- `cri.intervals::NTuple{N,<:AbstractVector{Interval}}`
+- `cri.offsets::NTuple{N-1,<:AbstractVector{Int}}` (empty tuple for `N = 1`)
+- `length(cri)` (compact-space size)
+- `iterate(cri)` / `cri[k]` (used only in test oracles, never in kernels)
+
+We deliberately do **not** depend on `domain(cri)` or a `domain` field — those
+no longer exist on the current CartesianRuns `ghost` branch. The kernels work
+on raw mesh integers extracted from `Interval.mask` ranges and `shift(::Interval)`;
+the matrix structure is determined by these alone. `row_cri` and `col_cri` are
+interpreted on a shared integer mesh, and the caller owns the coherence of
+that interpretation.
 
 ### Pointer-based sweep, no `Base.in` / `getindex`
 
