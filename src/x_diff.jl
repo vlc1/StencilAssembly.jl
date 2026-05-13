@@ -94,3 +94,50 @@ function _x_diff_fill_runs!(
     end
     return
 end
+
+# Public 1-D entry points.
+# Phase 1b will extend these to N ≥ 2 by adding `where {N}` methods that call
+# the recursive fused kernel.
+
+"""
+    forward_x_pattern(row_cri::CartesianRunIndices{1},
+                      col_cri::CartesianRunIndices{1},
+                      ::Type{T} = Float64) -> SparseMatrixCSC{T,Int}
+
+Sparsity pattern of the forward x-difference operator
+`(D phi)[i] = phi[i+1] - phi[i]` in 1-D, masked by `row_cri` (rows) and
+`col_cri` (columns). `nzval` is allocated but undef; call `forward_x_fill!`
+to populate it.
+"""
+function forward_x_pattern(
+    row_cri::CartesianRunIndices{1}, col_cri::CartesianRunIndices{1}, ::Type{T} = Float64,
+) where {T}
+    domain(row_cri) == domain(col_cri) || throw(ArgumentError(
+        "row_cri and col_cri must share the same domain"))
+    m, n = length(row_cri), length(col_cri)
+    colptr = Vector{Int}(undef, n + 1); colptr[1] = 1
+    rowval = Int[]
+    _x_diff_pattern_runs!(rowval, colptr, (1, 0),
+        row_cri.intervals[1], 1, length(row_cri.intervals[1]),
+        col_cri.intervals[1], 1, length(col_cri.intervals[1]))
+    nzval = Vector{T}(undef, length(rowval))
+    SparseMatrixCSC{T,Int}(m, n, colptr, rowval, nzval)
+end
+
+"""
+    forward_x_fill!(J::SparseMatrixCSC, row_cri, col_cri) -> J
+
+Fill `J.nzval` for the forward x-difference operator. `J` must have been built
+by `forward_x_pattern(row_cri, col_cri, eltype(J))`.
+"""
+function forward_x_fill!(
+    J::SparseMatrixCSC{T,Int},
+    row_cri::CartesianRunIndices{1}, col_cri::CartesianRunIndices{1},
+) where {T}
+    domain(row_cri) == domain(col_cri) || throw(ArgumentError(
+        "row_cri and col_cri must share the same domain"))
+    _x_diff_fill_runs!(J.nzval, J.colptr, (1, 0), (T(1), T(-1)),
+        row_cri.intervals[1], 1, length(row_cri.intervals[1]),
+        col_cri.intervals[1], 1, length(col_cri.intervals[1]))
+    return J
+end

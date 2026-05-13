@@ -63,3 +63,31 @@ end
         @test nzval == [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]
     end
 end
+
+@testset "forward_x (1-D)" begin
+    @testset "full mask 5" begin
+        row = CartesianRunIndices(trues(5))
+        col = CartesianRunIndices(trues(5))
+        J = forward_x_pattern(row, col)
+        forward_x_fill!(J, row, col)
+        ref = stencil_reference((CartesianIndex(1), CartesianIndex(0)), (1.0, -1.0), row, col)
+        @test J == ref
+    end
+    @testset "holed masks" begin
+        row = CartesianRunIndices(Bool[1, 0, 1, 1])
+        col = CartesianRunIndices(Bool[1, 1, 0, 1])
+        J = forward_x_pattern(row, col)
+        forward_x_fill!(J, row, col)
+        ref = stencil_reference((CartesianIndex(1), CartesianIndex(0)), (1.0, -1.0), row, col)
+        @test J == ref
+    end
+    @testset "Float32 element type" begin
+        row = CartesianRunIndices(trues(4))
+        col = CartesianRunIndices(trues(4))
+        J = forward_x_pattern(row, col, Float32)
+        forward_x_fill!(J, row, col)
+        ref = stencil_reference((CartesianIndex(1), CartesianIndex(0)), (1f0, -1f0), row, col)
+        @test J == ref
+        @test eltype(J) == Float32
+    end
+end
