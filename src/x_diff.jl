@@ -1,4 +1,20 @@
 """
+    _check_offsets_sorted_descending(offsets)
+
+Throw `ArgumentError` unless `offsets` is strictly descending. Required so that
+the pointer-sweep kernels emit per-column `rowval` monotonically ascending —
+the invariant `SparseMatrixCSC` demands. See "How operations work" in the
+README for the tie between offset ordering and the CSC representation.
+"""
+function _check_offsets_sorted_descending(offsets::NTuple{K,Int}) where {K}
+    for k in 2:K
+        offsets[k - 1] > offsets[k] || throw(ArgumentError(
+            "offsets must be strictly descending (got $offsets); required for SparseMatrixCSC rowval-per-column sortedness"))
+    end
+    return nothing
+end
+
+"""
     _x_diff_pattern_runs!(rowval, colptr, offsets,
                           row_ivs, row_lo, row_hi,
                           col_ivs, col_lo, col_hi)
@@ -108,16 +124,20 @@ Sparsity pattern of the forward x-difference operator
 `(D phi)[i] = phi[i+1] - phi[i]` in 1-D, masked by `row_cri` (rows) and
 `col_cri` (columns). `nzval` is allocated but undef; call `forward_x_fill!`
 to populate it.
+
+`row_cri` and `col_cri` are interpreted on a shared integer mesh; the caller
+is responsible for ensuring that interpretation is coherent. No domain match
+is enforced.
 """
 function forward_x_pattern(
     row_cri::CartesianRunIndices{1}, col_cri::CartesianRunIndices{1}, ::Type{T} = Float64,
 ) where {T}
-    domain(row_cri) == domain(col_cri) || throw(ArgumentError(
-        "row_cri and col_cri must share the same domain"))
+    offsets = (1, 0)
+    _check_offsets_sorted_descending(offsets)
     m, n = length(row_cri), length(col_cri)
     colptr = Vector{Int}(undef, n + 1); colptr[1] = 1
     rowval = Int[]
-    _x_diff_pattern_runs!(rowval, colptr, (1, 0),
+    _x_diff_pattern_runs!(rowval, colptr, offsets,
         row_cri.intervals[1], 1, length(row_cri.intervals[1]),
         col_cri.intervals[1], 1, length(col_cri.intervals[1]))
     nzval = Vector{T}(undef, length(rowval))
@@ -134,9 +154,9 @@ function forward_x_fill!(
     J::SparseMatrixCSC{T,Int},
     row_cri::CartesianRunIndices{1}, col_cri::CartesianRunIndices{1},
 ) where {T}
-    domain(row_cri) == domain(col_cri) || throw(ArgumentError(
-        "row_cri and col_cri must share the same domain"))
-    _x_diff_fill_runs!(J.nzval, J.colptr, (1, 0), (T(1), T(-1)),
+    offsets = (1, 0)
+    _check_offsets_sorted_descending(offsets)
+    _x_diff_fill_runs!(J.nzval, J.colptr, offsets, (T(1), T(-1)),
         row_cri.intervals[1], 1, length(row_cri.intervals[1]),
         col_cri.intervals[1], 1, length(col_cri.intervals[1]))
     return J
@@ -146,17 +166,18 @@ end
     backward_x_pattern(row_cri, col_cri, T = Float64) -> SparseMatrixCSC{T,Int}
 
 Sparsity pattern of the backward x-difference operator
-`(D phi)[i] = phi[i] - phi[i-1]` in 1-D.
+`(D phi)[i] = phi[i] - phi[i-1]` in 1-D. See `forward_x_pattern` for masking
+semantics.
 """
 function backward_x_pattern(
     row_cri::CartesianRunIndices{1}, col_cri::CartesianRunIndices{1}, ::Type{T} = Float64,
 ) where {T}
-    domain(row_cri) == domain(col_cri) || throw(ArgumentError(
-        "row_cri and col_cri must share the same domain"))
+    offsets = (0, -1)
+    _check_offsets_sorted_descending(offsets)
     m, n = length(row_cri), length(col_cri)
     colptr = Vector{Int}(undef, n + 1); colptr[1] = 1
     rowval = Int[]
-    _x_diff_pattern_runs!(rowval, colptr, (0, -1),
+    _x_diff_pattern_runs!(rowval, colptr, offsets,
         row_cri.intervals[1], 1, length(row_cri.intervals[1]),
         col_cri.intervals[1], 1, length(col_cri.intervals[1]))
     nzval = Vector{T}(undef, length(rowval))
@@ -170,9 +191,9 @@ function backward_x_fill!(
     J::SparseMatrixCSC{T,Int},
     row_cri::CartesianRunIndices{1}, col_cri::CartesianRunIndices{1},
 ) where {T}
-    domain(row_cri) == domain(col_cri) || throw(ArgumentError(
-        "row_cri and col_cri must share the same domain"))
-    _x_diff_fill_runs!(J.nzval, J.colptr, (0, -1), (T(1), T(-1)),
+    offsets = (0, -1)
+    _check_offsets_sorted_descending(offsets)
+    _x_diff_fill_runs!(J.nzval, J.colptr, offsets, (T(1), T(-1)),
         row_cri.intervals[1], 1, length(row_cri.intervals[1]),
         col_cri.intervals[1], 1, length(col_cri.intervals[1]))
     return J
@@ -182,17 +203,18 @@ end
     central_x_pattern(row_cri, col_cri, T = Float64) -> SparseMatrixCSC{T,Int}
 
 Sparsity pattern of the central x-difference operator
-`(D phi)[i] = phi[i+1] - phi[i-1]` in 1-D.
+`(D phi)[i] = phi[i+1] - phi[i-1]` in 1-D. See `forward_x_pattern` for masking
+semantics.
 """
 function central_x_pattern(
     row_cri::CartesianRunIndices{1}, col_cri::CartesianRunIndices{1}, ::Type{T} = Float64,
 ) where {T}
-    domain(row_cri) == domain(col_cri) || throw(ArgumentError(
-        "row_cri and col_cri must share the same domain"))
+    offsets = (1, -1)
+    _check_offsets_sorted_descending(offsets)
     m, n = length(row_cri), length(col_cri)
     colptr = Vector{Int}(undef, n + 1); colptr[1] = 1
     rowval = Int[]
-    _x_diff_pattern_runs!(rowval, colptr, (1, -1),
+    _x_diff_pattern_runs!(rowval, colptr, offsets,
         row_cri.intervals[1], 1, length(row_cri.intervals[1]),
         col_cri.intervals[1], 1, length(col_cri.intervals[1]))
     nzval = Vector{T}(undef, length(rowval))
@@ -206,9 +228,9 @@ function central_x_fill!(
     J::SparseMatrixCSC{T,Int},
     row_cri::CartesianRunIndices{1}, col_cri::CartesianRunIndices{1},
 ) where {T}
-    domain(row_cri) == domain(col_cri) || throw(ArgumentError(
-        "row_cri and col_cri must share the same domain"))
-    _x_diff_fill_runs!(J.nzval, J.colptr, (1, -1), (T(1), T(-1)),
+    offsets = (1, -1)
+    _check_offsets_sorted_descending(offsets)
+    _x_diff_fill_runs!(J.nzval, J.colptr, offsets, (T(1), T(-1)),
         row_cri.intervals[1], 1, length(row_cri.intervals[1]),
         col_cri.intervals[1], 1, length(col_cri.intervals[1]))
     return J
