@@ -1,38 +1,18 @@
 """
-    _isless_columnmajor(a::CartesianIndex{N}, b::CartesianIndex{N}) -> Bool
-
-Strict column-major lexicographic comparison: `a < b` iff `a[N] < b[N]`, or
-`a[N] == b[N]` and the dim-`(N-1)..1` components compare strictly less. The
-outermost dimension is most significant, matching the natural compact order of
-`CartesianRunIndices`.
-"""
-@inline function _isless_columnmajor(
-    a::CartesianIndex{N}, b::CartesianIndex{N},
-) where {N}
-    ta = Tuple(a); tb = Tuple(b)
-    for d in N:-1:1
-        ta[d] < tb[d] && return true
-        ta[d] > tb[d] && return false
-    end
-    return false
-end
-
-"""
     _check_offsets_sorted_descending(offsets)
 
 Throw `ArgumentError` unless `offsets::NTuple{K,CartesianIndex{N}}` is strictly
-descending in column-major lex. Required so that the pointer-sweep kernels emit
-per-column `rowval` monotonically ascending — the invariant `SparseMatrixCSC`
-demands. See "How operations work" in the README for the tie between offset
-ordering and the CSC representation.
+descending in column-major lex. Julia's default `isless` on `CartesianIndex` is
+column-major lex (compares `last(I)` first), so `issorted(offsets; lt = >=)`
+captures the strict-descending constraint directly. Required so that the
+pointer-sweep kernels emit per-column `rowval` monotonically ascending — the
+invariant `SparseMatrixCSC` demands. See "How operations work" in the README.
 """
 function _check_offsets_sorted_descending(
     offsets::NTuple{K,CartesianIndex{N}},
 ) where {K,N}
-    for k in 2:K
-        _isless_columnmajor(offsets[k], offsets[k - 1]) || throw(ArgumentError(
-            "offsets must be strictly descending in column-major lex (got $offsets); required for SparseMatrixCSC rowval-per-column sortedness"))
-    end
+    issorted(offsets; lt = >=) || throw(ArgumentError(
+        "offsets must be strictly descending in column-major lex (got $offsets); required for SparseMatrixCSC rowval-per-column sortedness"))
     return nothing
 end
 
