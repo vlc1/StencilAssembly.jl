@@ -19,3 +19,5 @@ include("reference.jl")
         @test M == sparse([1, 1, 2, 2, 3], [1, 2, 2, 3, 3], [-1.0, 1.0, -1.0, 1.0, -1.0], 3, 3)
     end
 end
+
+include("test_x_diff.jl")
