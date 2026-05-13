@@ -141,3 +141,39 @@ function forward_x_fill!(
         col_cri.intervals[1], 1, length(col_cri.intervals[1]))
     return J
 end
+
+"""
+    backward_x_pattern(row_cri, col_cri, T = Float64) -> SparseMatrixCSC{T,Int}
+
+Sparsity pattern of the backward x-difference operator
+`(D phi)[i] = phi[i] - phi[i-1]` in 1-D.
+"""
+function backward_x_pattern(
+    row_cri::CartesianRunIndices{1}, col_cri::CartesianRunIndices{1}, ::Type{T} = Float64,
+) where {T}
+    domain(row_cri) == domain(col_cri) || throw(ArgumentError(
+        "row_cri and col_cri must share the same domain"))
+    m, n = length(row_cri), length(col_cri)
+    colptr = Vector{Int}(undef, n + 1); colptr[1] = 1
+    rowval = Int[]
+    _x_diff_pattern_runs!(rowval, colptr, (0, -1),
+        row_cri.intervals[1], 1, length(row_cri.intervals[1]),
+        col_cri.intervals[1], 1, length(col_cri.intervals[1]))
+    nzval = Vector{T}(undef, length(rowval))
+    SparseMatrixCSC{T,Int}(m, n, colptr, rowval, nzval)
+end
+
+"""
+    backward_x_fill!(J::SparseMatrixCSC, row_cri, col_cri) -> J
+"""
+function backward_x_fill!(
+    J::SparseMatrixCSC{T,Int},
+    row_cri::CartesianRunIndices{1}, col_cri::CartesianRunIndices{1},
+) where {T}
+    domain(row_cri) == domain(col_cri) || throw(ArgumentError(
+        "row_cri and col_cri must share the same domain"))
+    _x_diff_fill_runs!(J.nzval, J.colptr, (0, -1), (T(1), T(-1)),
+        row_cri.intervals[1], 1, length(row_cri.intervals[1]),
+        col_cri.intervals[1], 1, length(col_cri.intervals[1]))
+    return J
+end

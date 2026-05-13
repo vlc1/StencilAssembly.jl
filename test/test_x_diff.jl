@@ -91,3 +91,22 @@ end
         @test eltype(J) == Float32
     end
 end
+
+@testset "backward_x (1-D)" begin
+    @testset "full mask 5" begin
+        row = CartesianRunIndices(trues(5))
+        col = CartesianRunIndices(trues(5))
+        J = backward_x_pattern(row, col)
+        backward_x_fill!(J, row, col)
+        ref = stencil_reference((CartesianIndex(0), CartesianIndex(-1)), (1.0, -1.0), row, col)
+        @test J == ref
+    end
+    @testset "holed masks" begin
+        row = CartesianRunIndices(Bool[1, 0, 1, 1])
+        col = CartesianRunIndices(Bool[1, 1, 0, 1])
+        J = backward_x_pattern(row, col)
+        backward_x_fill!(J, row, col)
+        ref = stencil_reference((CartesianIndex(0), CartesianIndex(-1)), (1.0, -1.0), row, col)
+        @test J == ref
+    end
+end
