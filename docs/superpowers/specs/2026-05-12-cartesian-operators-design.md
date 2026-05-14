@@ -2,6 +2,13 @@
 
 Date: 2026-05-12
 
+> **Design rationale, partially superseded.** The "why" behind the
+> abstractions (pointer-based sweep, subtraction convention, CSC offset
+> ordering, boundary policy) still holds. The API surface has since evolved:
+> the hard-coded `*_pattern` / `*_fill!` wrappers were replaced by a
+> `LinearStencil` type with `assemble` / `update!`. See
+> [`docs/plan.md`](../../plan.md) for the current shape.
+
 ## Purpose
 
 Build a Julia package that, given a stencil pattern (list of mesh-space

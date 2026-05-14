@@ -18,6 +18,9 @@ col = CartesianRunIndices(Bool[1, 1, 0, 1])
 # A stencil = (mesh dimension, offsets, coefs). Forward x-difference:
 forward = LinearStencil{1}((1, 0), (1.0, -1.0))   # (D ϕ)[i] = ϕ[i+1] − ϕ[i]
 
+# assemble builds the sparsity pattern; update! fills the values. They are
+# split so the pattern is built once and the values re-filled cheaply across
+# many iterations of an outer solver.
 J = assemble(forward, row, col)   # SparseMatrixCSC{Float64,Int}, nzval undef
 update!(J, forward, row, col)     # writes J.nzval allocation-free
 ```
@@ -105,10 +108,14 @@ This is a work in progress. Currently implemented:
 - `assemble` / `update!` for `LinearStencil{1}` against
   `CartesianRunIndices{1}` (1-D only).
 
-Planned: N-D dispatch — `LinearStencil{D}` against `CartesianRunIndices{N}`
-for any `D ≤ N` via a recursive dimensional-peeling kernel; then a higher-
-level abstraction for compositions (e.g., the Laplacian as a sum of
-`LinearStencil`s along each dimension).
+Next milestone: N-D dispatch — `LinearStencil{D}` against
+`CartesianRunIndices{N}` for any `D ≤ N` via a recursive dimensional-peeling
+kernel; then a higher-level abstraction for compositions (e.g., the
+Laplacian as a sum of `LinearStencil`s along each dimension).
 
-See `docs/superpowers/specs/2026-05-12-cartesian-operators-design.md` for the
-original design rationale.
+### Further reading
+
+- [`docs/plan.md`](docs/plan.md) — forward-looking implementation plan
+  (status, roadmap, next-milestone design).
+- [`docs/superpowers/specs/2026-05-12-cartesian-operators-design.md`](docs/superpowers/specs/2026-05-12-cartesian-operators-design.md)
+  — original design rationale.

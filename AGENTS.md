@@ -9,7 +9,8 @@ exposed as separate operations; the fill is allocation-free up to a small
 constant-size buffer.
 
 - Package name: **`CartesianOperators.jl`**.
-- Reference design: `docs/superpowers/specs/2026-05-12-cartesian-operators-design.md`.
+- Forward-looking plan: [`docs/plan.md`](docs/plan.md).
+- Design rationale (historical): [`docs/superpowers/specs/2026-05-12-cartesian-operators-design.md`](docs/superpowers/specs/2026-05-12-cartesian-operators-design.md).
 
 ## Files
 
@@ -105,7 +106,15 @@ Implemented: `LinearStencil{D,K,T}` constructor (any `D`); `assemble` and
 `update!` for 1-D dispatch only (`LinearStencil{1}` against
 `CartesianRunIndices{1}` → `SparseMatrixCSC{T,Int}`).
 
-Deferred: N-D dispatch (`CartesianRunIndices{N}` × `LinearStencil{D}` with
-`1 ≤ D ≤ N`) via a recursive dimensional-peeling kernel; higher-level
-abstractions (Laplacian as composition); non-`SparseMatrixCSC` matrix
-targets.
+Next milestone (see [`docs/plan.md`](docs/plan.md) for the design):
+
+- **N-D dispatch** — `CartesianRunIndices{N}` × `LinearStencil{D}` with
+  `1 ≤ D ≤ N` via recursive dimensional-peeling kernels
+  (`_pattern_fused!`, `_fill_fused!`). The new kernels branch on `Nd vs
+  D` and bottom out at `_pattern_runs!` / `_pattern_runs_intersect!`
+  depending on whether the base case is the stencil dim or an inner
+  intersection dim.
+
+Further deferred milestones (sketched in the plan): composition (e.g.,
+Laplacian as a sum of `LinearStencil`s), non-`SparseMatrixCSC` matrix
+targets (`BandedMatrix`, dense), variable coefficients.

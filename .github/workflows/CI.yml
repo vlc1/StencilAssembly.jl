@@ -37,5 +37,12 @@ jobs:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v2
+      # CartesianRuns is not in the General registry; it is listed in
+      # Project.toml [deps] by UUID and resolved locally via a dev-path.
+      # Fetch it from its repository, pinned to the branch this package is
+      # developed against, before buildpkg/instantiate runs. Revisit this
+      # step once CartesianRuns is registered or the branch is merged.
+      - name: Install unregistered dependency (CartesianRuns)
+        run: julia --project=. -e 'using Pkg; Pkg.add(url="https://github.com/vlc1/CartesianRuns.jl", rev="ghost")'
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
