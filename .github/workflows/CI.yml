@@ -36,7 +36,7 @@ jobs:
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
       # CartesianRuns is not in the General registry; it is listed in
       # Project.toml [deps] by UUID and resolved locally via a dev-path.
       # Fetch it from its repository, pinned to the branch this package is
