@@ -2,6 +2,7 @@
 # same underlying integer mesh (`dom` argument).
 
 using CartesianRuns
+using FillArrays
 using SparseArrays
 using Random
 using CartesianOperators
@@ -55,9 +56,10 @@ C2 = stencil_reference((CartesianIndex(1), CartesianIndex(-1)), (1.0, -1.0), row
 @show C1 == C2
 
 # assemble + update! cross-check against the naive oracle
-st_f = LinearStencil{1}((1,  0), (1.0, -1.0))
-st_b = LinearStencil{1}((0, -1), (1.0, -1.0))
-st_c = LinearStencil{1}((1, -1), (1.0, -1.0))
+n = length(dom[1])
+st_f = LinearStencil{1}((1,  0), (Fill(1.0, n), Fill(-1.0, n)))
+st_b = LinearStencil{1}((0, -1), (Fill(1.0, n), Fill(-1.0, n)))
+st_c = LinearStencil{1}((1, -1), (Fill(1.0, n), Fill(-1.0, n)))
 
 F3 = assemble(st_f, row, col); update!(F3, st_f, row, col)
 B3 = assemble(st_b, row, col); update!(B3, st_b, row, col)

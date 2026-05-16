@@ -1,6 +1,6 @@
 # CartesianOperators implementation plan
 
-Forward-looking; updated after the LinearStencil refactor (commit `37bd7ae`).
+Forward-looking; updated after the variable-coefficient refactor.
 For the "why" behind the abstractions, see
 [`docs/superpowers/specs/2026-05-12-cartesian-operators-design.md`](superpowers/specs/2026-05-12-cartesian-operators-design.md).
 The original task-by-task plan at
@@ -11,18 +11,28 @@ is historical; it was overtaken by the move to a type-driven API.
 
 Implemented:
 
-- `LinearStencil{D,K,T}` — constant-coefficient 1-D stencil aligned with
-  mesh dimension `D`. Inner constructor validates `D ≥ 1` and strict-
-  descending offsets via `issorted(offsets; lt = >=)`.
+- `LinearStencil{D,K,T,N,C<:NTuple{K,AbstractArray{T,N}}}` —
+  variable-coefficient stencil aligned with mesh dimension `D`. Coefs are
+  `AbstractArray{T,N}` (heterogeneous containers allowed: `Fill` + `Vector`
+  + `OffsetArray` etc., as long as shared `eltype` and `ndims`). Inner
+  constructor (well-typed path) validates `D ≥ 1` and strict-descending
+  offsets via `issorted(offsets; lt = >=)`; shared `eltype`/`ndims` are
+  enforced by the method signature. A catch-all outer constructor reports
+  friendly `ArgumentError`s for ill-typed inputs.
+- Column-anchor coefficient convention: kernel reads `coefs[k][c_idx]` at
+  each emission. `c_idx` and `r_idx = c_idx − Δ_idx` are both mesh
+  positions on the *shared* mesh that `row` and `col` cri's live on.
 - `assemble(st, row, col, ::Type{SparseMatrixCSC{T,Int}} = …)` and
-  `update!(mat, st, row, col)` for `LinearStencil{1}` against
+  `update!(mat, st, row, col)` for `LinearStencil{D,K,T,1}` against
   `CartesianRunIndices{1}`.
 - Pointer-sweep kernels `_pattern_runs!` and `_fill_runs!` (1-D base; do
-  not call `Base.in` or `getindex` on the cri).
-- Test suite (23 assertions): constructor validation, 1-D kernel direct
-  tests, integration tests for forward / backward / central
-  x-differences against `stencil_reference`, Float32 element type, and
-  `D ≠ 1` dispatch rejection.
+  not call `Base.in` or `getindex` on the cri). `_fill_runs!` reads
+  `coefs[k][c]` at each emission (column anchor).
+- Test suite (29 assertions): constructor validation (inner + outer
+  friendly errors), 1-D kernel direct tests, integration tests for
+  forward / backward / central x-differences against `stencil_reference`,
+  Float32 element type, a variable-coefficient density-weighted gradient,
+  and `D ≠ 1` dispatch rejection.
 - Cross-check oracle in `test/oracle.jl`: three independent correctness
   routes (pointer-sweep kernel via `assemble`+`update!`, dictionary-based
   `stencil_reference`, `spdiagm`-based `stencil_naive_x`) agree on random
@@ -31,21 +41,25 @@ Implemented:
 Deliberately not exported / not shipped:
 
 - Named convenience constants (`forward_x`, etc.). Callers construct
-  `LinearStencil{1}((1, 0), (1.0, -1.0))` inline.
+  `LinearStencil{1}((1, 0), (Fill(1.0, n), Fill(-1.0, n)))` inline.
 - `domain(cri)` access. The package treats `CartesianRunIndices` as
   carrying only `intervals`, `offsets`, and the `length`/iteration
   interface (see `AGENTS.md`).
+- Scalar-coef sugar. The constructor takes `AbstractArray`s only; users
+  wrap constants in `FillArrays.Fill`.
 
 ## Roadmap
 
 ### Next milestone — N-D dispatch
 
-Extend `assemble` / `update!` to `LinearStencil{D}` against
+Extend `assemble` / `update!` to `LinearStencil{D,K,T,N}` against
 `CartesianRunIndices{N}` for any `1 ≤ D ≤ N`. The stencil acts on mesh
 dim `D`; the remaining `N − 1` dims are "outer" with zero shift. The
 same code path handles every D — `D = 1` is x-aligned, `D = 2`
 y-aligned, and so on; the original Phase 1b (N-D x) and Phase 2 (y in
-N-D) collapse into one piece of work.
+N-D) collapse into one piece of work. The coef tuple's `N` parameter
+already matches the cri's `N` at the type level, so the method
+signature pins them together by type variable.
 
 #### Kernel structure
 
@@ -148,7 +162,7 @@ with `@code_warntype` after implementation.
 
    ```julia
    function assemble(
-       st::LinearStencil{D,K,T},
+       st::LinearStencil{D,K,T,N},
        row::CartesianRunIndices{N},
        col::CartesianRunIndices{N},
        ::Type{SparseMatrixCSC{T,Int}} = SparseMatrixCSC{T,Int},
@@ -160,7 +174,7 @@ with `@code_warntype` after implementation.
 
    function update!(
        mat::SparseMatrixCSC{T,Int},
-       st::LinearStencil{D,K,T},
+       st::LinearStencil{D,K,T,N},
        row::CartesianRunIndices{N},
        col::CartesianRunIndices{N},
    ) where {D,K,T,N}
@@ -209,6 +223,19 @@ with `@code_warntype` after implementation.
 
 ### Further milestones (sketched)
 
+#### Contiguous-offset kernel fast path
+
+When the stencil's offsets form a contiguous descending range (the typical
+shape `(N, N-1, …, 1, 0, -1, …, -N′)`), the K independent row-pointers in
+`_pattern_runs!` / `_fill_runs!` (and their N-D counterparts) collapse to a
+*single* row-pointer that marches forward through consecutive row positions
+per column-cell. Estimated speedup: small constant (< 2×) on the inner
+loop in 1-D; more pronounced at the N-D outer-dim level where the same
+saving accumulates over inner-dim recursion. Plumbing: a trait or alias on
+`LinearStencil` that detects "contiguous descending offsets" at compile time
+and dispatches to a specialized kernel; no public-API change. Defer until
+the N-D kernels exist and profiling motivates the work.
+
 #### Composition / Laplacian
 
 The discrete Laplacian on a Cartesian grid is `Δ = Σ_d ∂²/∂x_d²`. Two
@@ -238,19 +265,6 @@ extension. Likely candidates:
 
 Implementation: new method dispatched on the target type, sharing the
 kernel sweep but emitting into the target format's representation.
-
-#### Variable coefficients
-
-Constant coefficients cover most CFD on uniform grids. For non-uniform
-grids or position-dependent diffusion, two approaches:
-
-1. **Per-cell coefficient array.** A `VariableStencil{D,K,T,N}` whose
-   `coefs::Array{T,N+1}` carries `(coef per stencil term) × (per
-   mesh cell)`.
-2. **Callable.** `update!` accepts a `coef_fn(cell::CartesianIndex{N},
-   k::Int) -> T` and queries it per emission.
-
-Decision: defer.
 
 ## Verification approach
 

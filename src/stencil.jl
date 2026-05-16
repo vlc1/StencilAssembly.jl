@@ -1,51 +1,83 @@
 """
-    LinearStencil{D,K,T}
+    LinearStencil{D,K,T,N,C<:NTuple{K,AbstractArray{T,N}}}
 
-A constant-coefficient stencil aligned with mesh dimension `D`. The matrix
-entry from column `c` (at mesh position `p_c`) to row `r = p_c − Δ_k` carries
-coefficient `coefs[k]`, for each `k` in `1:K`.
+A variable-coefficient stencil aligned with mesh dimension `D`. For column `c`
+at mesh position `p_c` and offset `Δ_k`, the matrix entry lands on the row at
+mesh position `p_c − Δ_k` and carries coefficient `coefs[k][p_c]` — i.e., coefs
+are anchored at the **column** mesh position (see `AGENTS.md`).
 
 # Type parameters
 
 - `D::Int` — mesh dimension on which the stencil acts (1-based).
 - `K::Int` — number of stencil terms.
-- `T` — coefficient eltype.
+- `T` — shared element type of every coef array.
+- `N` — coef-array dimensionality; matches the `CartesianRunIndices{N}` the
+  stencil will be assembled against.
+- `C` — concrete tuple type of the coef containers; inferred from the
+  constructor call. Heterogeneous containers (e.g. `Fill` + `Vector`) are fine
+  as long as they share `eltype` and `ndims`.
 
 # Fields
 
 - `offsets::NTuple{K,Int}` — strictly descending 1-D offsets along dim `D`.
-- `coefs::NTuple{K,T}` — matching coefficients in the same order.
+- `coefs::C` — `NTuple{K,<:AbstractArray{T,N}}` of coefficient arrays.
 
 # Construction
 
     LinearStencil{D}(offsets, coefs)
 
-Strict-descending offset order is required by the `SparseMatrixCSC` `rowval`-
-per-column sortedness invariant; the constructor validates via
-`issorted(offsets; lt = >=)`. `D ≥ 1` is also validated.
+Inner constructor (well-typed path) validates `D ≥ 1` and strict-descending
+offsets via `issorted(offsets; lt = >=)`. The shared `eltype`/`ndims` of
+`coefs` are enforced by the method signature.
+
+A catch-all outer constructor (`LinearStencil{D}(::Tuple, ::Tuple)`) reports
+friendly errors when the inputs are ill-typed (length mismatch, non-`Int`
+offsets, non-`AbstractArray` coefs, mixed `eltype`, or mixed `ndims`).
 
 # Examples
 
 ```julia
-forward_x  = LinearStencil{1}((1,  0), (1.0, -1.0))   # (D ϕ)[i] = ϕ[i+1] − ϕ[i]
-backward_x = LinearStencil{1}((0, -1), (1.0, -1.0))   # (D ϕ)[i] = ϕ[i]   − ϕ[i-1]
-central_x  = LinearStencil{1}((1, -1), (1.0, -1.0))   # (D ϕ)[i] = ϕ[i+1] − ϕ[i-1]
+using FillArrays
+n = 5
+forward_x = LinearStencil{1}((1, 0), (Fill(1.0, n), Fill(-1.0, n)))
+# variable-coef: density-weighted gradient ψ[i] = (φ[i] − φ[i−1]) / ρ[i]
+ρ = rand(n)
+grad = LinearStencil{1}((0, -1), (1 ./ ρ, -1 ./ ρ))
 ```
 """
-struct LinearStencil{D,K,T}
+struct LinearStencil{D,K,T,N,C<:NTuple{K,AbstractArray{T,N}}}
     offsets::NTuple{K,Int}
-    coefs::NTuple{K,T}
+    coefs::C
 
     function LinearStencil{D}(
         offsets::NTuple{K,Int},
-        coefs::NTuple{K,T},
-    ) where {D,K,T}
+        coefs::NTuple{K,AbstractArray{T,N}},
+    ) where {D,K,T,N}
         D isa Int && D >= 1 || throw(ArgumentError(
             "stencil dimension D must be a positive Int (got $D)"))
         issorted(offsets; lt = >=) || throw(ArgumentError(
             "offsets must be strictly descending (got $offsets); required for SparseMatrixCSC rowval-per-column sortedness"))
-        new{D,K,T}(offsets, coefs)
+        new{D,K,T,N,typeof(coefs)}(offsets, coefs)
     end
+end
+
+# Catch-all outer constructor: friendly errors for ill-typed inputs. Only fires
+# when the inner method's NTuple{K,AbstractArray{T,N}} signature does not match
+# (mixed eltype, mixed ndims, non-array elements, length mismatch, etc.).
+function LinearStencil{D}(offsets::Tuple, coefs::Tuple) where {D}
+    length(offsets) == length(coefs) || throw(ArgumentError(
+        "offsets has length $(length(offsets)) but coefs has length $(length(coefs))"))
+    all(o -> o isa Int, offsets) || throw(ArgumentError(
+        "offsets must be a tuple of Int (got $(map(typeof, offsets)))"))
+    all(c -> c isa AbstractArray, coefs) || throw(ArgumentError(
+        "each coef must be an AbstractArray (got $(map(typeof, coefs)))"))
+    Ts = map(eltype, coefs)
+    all(==(first(Ts)), Ts) || throw(ArgumentError(
+        "all coefs must share the same eltype (got $Ts)"))
+    Ns = map(ndims, coefs)
+    all(==(first(Ns)), Ns) || throw(ArgumentError(
+        "all coefs must share the same ndims (got $Ns)"))
+    throw(ArgumentError("LinearStencil could not be constructed; coefs = $coefs"))
 end
 
 """
@@ -104,17 +136,18 @@ end
                 row_ivs, row_lo, row_hi,
                 col_ivs, col_lo, col_hi)
 
-1-D fill kernel. Runs the **same** sweep as `_pattern_runs!`, but instead of
-appending to `rowval` it writes `nzval[colptr[c_compact] + slot] = coefs[k]`
-where `slot` is the per-column running offset count and `k` is the index of
-the offset that hit. `offsets` and `coefs` must be in the same order.
-Allocation-free apart from the K-element `rps` pointer buffer.
+1-D fill kernel. Runs the **same** sweep as `_pattern_runs!`, but writes
+`nzval[colptr[c_compact] + slot] = coefs[k][c]` (column-anchored variable-coef
+read) where `slot` is the per-column running offset count and `k` indexes the
+offset that hit. `offsets` and `coefs` must be in the same order. Allocation-
+free apart from the K-element `rps` pointer buffer (and whatever `getindex` on
+the user's coef arrays costs — `Vector`, `Fill`, `OffsetArray` etc. are O(1)).
 """
 function _fill_runs!(
     nzval::AbstractVector{T},
     colptr::Vector{Int},
     offsets::NTuple{K,Int},
-    coefs::NTuple{K,T},
+    coefs::NTuple{K,AbstractArray{T,1}},
     row_ivs::AbstractVector{Interval}, row_lo::Int, row_hi::Int,
     col_ivs::AbstractVector{Interval}, col_lo::Int, col_hi::Int,
 ) where {K,T}
@@ -134,7 +167,7 @@ function _fill_runs!(
                 if rps[k] <= row_hi
                     row_iv = row_ivs[rps[k]]
                     if row_iv.mask.start <= r
-                        nzval[slot] = coefs[k]
+                        nzval[slot] = coefs[k][c]
                         slot += 1
                     end
                 end
@@ -145,7 +178,7 @@ function _fill_runs!(
 end
 
 """
-    assemble(st::LinearStencil{D,K,T},
+    assemble(st::LinearStencil{D,K,T,1},
              row::CartesianRunIndices{1}, col::CartesianRunIndices{1},
              ::Type{SparseMatrixCSC{T,Int}} = SparseMatrixCSC{T,Int})
         -> SparseMatrixCSC{T,Int}
@@ -162,7 +195,7 @@ Throws `ArgumentError` if `D ≠ 1` (1-D dispatch only; N-D follows in a
 subsequent step).
 """
 function assemble(
-    st::LinearStencil{D,K,T},
+    st::LinearStencil{D,K,T,1},
     row::CartesianRunIndices{1},
     col::CartesianRunIndices{1},
     ::Type{SparseMatrixCSC{T,Int}} = SparseMatrixCSC{T,Int},
@@ -180,7 +213,7 @@ function assemble(
 end
 
 """
-    update!(mat::SparseMatrixCSC{T,Int}, st::LinearStencil{D,K,T},
+    update!(mat::SparseMatrixCSC{T,Int}, st::LinearStencil{D,K,T,1},
             row::CartesianRunIndices{1}, col::CartesianRunIndices{1}) -> mat
 
 Write `mat.nzval` in place by re-walking `row`/`col` with `st`. `mat` must
@@ -192,7 +225,7 @@ Throws `ArgumentError` if `D ≠ 1`.
 """
 function update!(
     mat::SparseMatrixCSC{T,Int},
-    st::LinearStencil{D,K,T},
+    st::LinearStencil{D,K,T,1},
     row::CartesianRunIndices{1},
     col::CartesianRunIndices{1},
 ) where {D,K,T}
