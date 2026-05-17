@@ -108,31 +108,43 @@ Stencil offset → row outside `row` ⇒ that single `(row, col)` entry is
 dropped. Columns are sourced from `col` so off-mesh columns are never
 visited.
 
-### Kernel shape: K outer loops + mutate-restore-colptr
+### Kernel shape: segment walk over piecewise-constant per-column nnz
 
-`_pattern!` and `_fill!` are structured as `K` outer loops, one per offset.
-For each `k`, the c-range where offset `k` produces an in-range row is
+The per-column nnz count
 
-    c_lo_k = max(first(col), rmin + offsets[k])
-    c_hi_k = min(last(col), rmax + offsets[k])
+    q(c) = #{k : c_lo_k ≤ c ≤ c_hi_k},
+        c_lo_k = max(first(col), rmin + offsets[k])
+        c_hi_k = min(last(col), rmax + offsets[k])
 
-— computed once per `k`, not once per `c`. The kernels then sweep
-`c_lo_k:c_hi_k` and emit unconditionally, with no per-cell branching.
+is piecewise constant in `c` with at most `2K` breakpoints. Because
+offsets are strictly descending, both endpoints are non-increasing in
+`k`, so walking `k = k_last, …, k_first` yields two non-decreasing event
+streams (lo at `c_lo_k`, hi at `c_hi_k + 1`) — no sort needed. Empty
+c-ranges (offsets too large/small to reach any column) form a prefix
+and suffix in `k` and are trimmed up front to `[k_first, k_last]` in
+O(K).
 
-Per-column "next free slot" is tracked by mutating `colptr` in place during
-the fill phase, then restored to the proper CSC offset table by a
-shift-right pass at the end. Classic counting-sort-CSC; allocation-free.
+Within each constant-active segment with start column `prev`, start
+pointer `cur`, slope `active = i_hi − i_lo`, and active offsets
+`k_a:i_hi` (`k_a = i_lo + 1`), every write is a **closed-form pure
+function** of the loop indices — no read-modify-write, no sequential
+dependency:
 
-CSC sortedness holds because strict-descending offsets give
-`r_k = c − offsets[k]` ascending in `k`, so processing `k = 1, …, K` in
-order means within any column the writes happen in k-ascending →
-row-ascending. No sort step.
+    colptr[c − cmin + 2]                                  = cur + active * (c − prev + 1)
+    rowval[cur + active * (c − prev) + (k − k_a)]         = c − offsets[k] − rmin + 1
+    nzval [cur + active * (c − prev) + (k − k_a)]         = coefs[k][c]
 
-Caveat: during Phase 3 of `_pattern!` and during the fill phase of
-`_fill!`, `colptr[j]` holds the *next-free-slot* for column `j`, not the
-column start. The final shift-right pass restores it. Single-threaded use
-only; an interruption between fill and restore would leave `colptr`
-inconsistent.
+`cur += active * (e − prev)` between segments. `_pattern!` does the
+colptr and rowval writes in one walk; `_fill!` does only the nzval
+write and **does not touch `colptr`** — the matrix is consistent
+throughout the call. Allocation: `_pattern!` resizes `rowval` once to
+the analytic nnz (`Σ (c_hi_k − c_lo_k + 1)` over trimmed `k`); the
+kernels are otherwise allocation-free.
+
+CSC sortedness holds because for fixed `c`, slots are ascending in `k`
+and the emitted row `c − offsets[k]` is ascending in `k` (offsets
+strictly descending) — `SparseMatrixCSC`'s rowval-per-column invariant,
+without a sort.
 
 ### Offset ordering for CSC sortedness
 

@@ -111,28 +111,44 @@ construct the coef array directly in mesh-space so `coefs[k][c]` returns the
 intended weight. For constant coefs use `FillArrays.Fill` — O(1) storage and
 O(1) `getindex`.
 
-### Kernel shape: K outer loops + counting-sort-CSC
+### Kernel shape: segment walk over piecewise-constant per-column nnz
 
-The kernels run `K` outer loops, one per offset. For each `k`, the c-range
-where offset `k` produces an in-range row is computed once:
+The per-column nnz count `q(c) = #{k : c_lo_k ≤ c ≤ c_hi_k}`, with
 
 ```
 c_lo_k = max(first(col), rmin + offsets[k])
 c_hi_k = min(last(col), rmax + offsets[k])
 ```
 
-The inner loop sweeps `c_lo_k:c_hi_k` and emits unconditionally — no
-per-cell bounds check. Per-column "next free slot" is tracked by mutating
-`colptr` in place; restored to a proper CSC offset table by a shift-right
-pass at the end. Classic counting-sort-CSC, allocation-free.
+is piecewise constant in `c`. Because offsets are strictly descending,
+both endpoints are non-increasing in `k`, so the lo and hi event
+streams are already non-decreasing in column order — a two-pointer
+merge walks them without a sort. Empty c-ranges (offsets too large or
+small to reach any column) are trimmed up front in `O(K)`.
+
+Within each constant-active segment with start column `prev`, start
+pointer `cur`, slope `active = i_hi − i_lo`, and active offsets
+`k_a:i_hi` (`k_a = i_lo + 1`), every write is a **closed-form pure
+function** of the loop indices — no read-modify-write, no sequential
+dependency:
+
+```
+colptr[c − cmin + 2]                          = cur + active * (c − prev + 1)
+rowval[cur + active * (c − prev) + (k − k_a)] = c − offsets[k] − rmin + 1
+nzval [cur + active * (c − prev) + (k − k_a)] = coefs[k][c]
+```
+
+`_pattern!` does the colptr and rowval writes in one walk; `_fill!`
+does only the nzval write and does not touch `colptr`. Allocation: a
+single `resize!` of `rowval` to the analytic nnz; otherwise zero.
 
 ### Offset ordering is tied to `SparseMatrixCSC`
 
 `SparseMatrixCSC` requires `rowval` to be sorted ascending within each column.
 We satisfy that **without a per-column sort** by requiring stencil offsets to
-be **strictly descending** at the type boundary: under the subtraction
-convention, `r_k = c − offsets[k]` is ascending in `k`, so iterating
-`k = 1, …, K` outermost produces rows in ascending order within every
+be **strictly descending** at the type boundary: for fixed `c`, slots are
+ascending in `k` (`k − k_a` ascending), and `c − offsets[k]` is ascending
+in `k` (offsets descending) — so rows come out ascending within every
 column.
 
 The invariant is enforced by the `LinearStencil` inner constructor via

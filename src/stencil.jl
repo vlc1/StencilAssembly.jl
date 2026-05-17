@@ -93,35 +93,40 @@ end
 """
     _pattern!(rowval, colptr, offsets, row, col)
 
-1-D pattern kernel. `K` outer loops, one per offset; each loop sweeps the
-c-range where offset `k` produces an in-range row:
+1-D pattern kernel. Fills `colptr` and `rowval` for the sparsity pattern
+induced by `offsets` between the row and column index ranges.
 
-    c_lo_k = max(first(col), rmin + offsets[k])
-    c_hi_k = min(last(col), rmax + offsets[k])
+# Algorithm
 
-Four phases — clear → count → cumsum → fill+restore — using the counting-
-sort-CSC pattern, where `colptr` doubles as the per-column "next free slot"
-counter during fill and is restored to a proper CSC offset table by a
-shift-right pass at the end.
+The per-column nnz count `q(c) = #{k : c_lo_k ≤ c ≤ c_hi_k}` (with
+`c_lo_k = max(cmin, rmin + offsets[k])`, `c_hi_k = min(cmax, rmax + offsets[k])`)
+is **piecewise constant** with at most `2K` breakpoints. Because offsets
+are strictly descending, both endpoints are non-increasing in `k`, so
+walking `k = k_last, …, k_first` yields two non-decreasing event streams
+(lo at `c_lo_k`, hi at `c_hi_k + 1`) — no sort needed. Empty c-ranges
+(offsets too large/small to reach any column) form a prefix and suffix
+in `k` and are trimmed up front to `[k_first, k_last]`.
+
+Within each constant-active segment with start column `prev`, start
+pointer `cur`, slope `active = i_hi − i_lo`, and active offsets
+`k_a:i_hi` (`k_a = i_lo + 1`), the writes are **closed-form pure
+functions** of the loop indices — no read-modify-write of `colptr`, no
+sequential dependency:
+
+    colptr[c − cmin + 2]                                  = cur + active * (c − prev + 1)
+    rowval[cur + active * (c − prev) + (k − k_a)]         = c − offsets[k] − rmin + 1
 
 # CSC sortedness
 
-Strict-descending `offsets` give `r_k = c − offsets[k]` ascending in `k`.
-Processing `k = 1, …, K` in order means for any column the writes happen
-in k-ascending → row-ascending — the `SparseMatrixCSC` invariant — without
-a sort.
+For fixed `c`, slots are ascending in `k`, and the emitted row
+`c − offsets[k]` is ascending in `k` (offsets strictly descending) —
+the `SparseMatrixCSC` invariant, without a sort.
 
 # Allocation
 
-`Vector{Int}` `rowval` is `resize!`d once to the exact final length; no
-`push!`, no scratch buffer.
-
-# Invariant under interruption
-
-Mid-fill, `colptr[j]` temporarily stores the next-free-slot pointer for
-column `j`, not the column start. The Phase-4 shift-right restores the
-CSC offset table. If the kernel is interrupted between Phase 3 and Phase
-4, `colptr` is left in this intermediate state. Single-threaded use only.
+`Vector{Int}` `rowval` is `resize!`d once to the exact final length
+(computed analytically from the trimmed offsets); no `push!`, no scratch
+buffer.
 """
 function _pattern!(
     rowval::Vector{Int},
@@ -132,57 +137,79 @@ function _pattern!(
 ) where {K}
     rmin, rmax = first(row), last(row)
     cmin, cmax = first(col), last(col)
-    n = length(col)
-    # Phase 1 — count per-column emissions into colptr[2:n+1].
-    fill!(view(colptr, 2:n+1), 0)
-    for k in 1:K
-        c_lo = max(cmin, rmin + offsets[k])
-        c_hi = min(cmax, rmax + offsets[k])
-        for c in c_lo:c_hi
-            colptr[c - cmin + 2] += 1
-        end
-    end
-    # Phase 2 — cumsum into colptr (colptr[1] = 1 set by caller).
     colptr[1] = 1
-    for j in 2:n+1
-        colptr[j] += colptr[j-1]
+
+    # Precompute event positions per offset.
+    lo    = ntuple(k -> max(cmin, rmin + offsets[k]),     Val(K))
+    hi_p1 = ntuple(k -> min(cmax, rmax + offsets[k]) + 1, Val(K))
+
+    # Trim k to the non-empty range. Offsets strictly descending → empty
+    # c-ranges form a prefix (offsets too large) and a suffix (too small).
+    k_first = 1
+    while k_first <= K && offsets[k_first] > cmax - rmin
+        k_first += 1
     end
-    # Phase 3 — fill rowval; mutate colptr as the per-column slot tracker.
-    resize!(rowval, colptr[n+1] - 1)
-    for k in 1:K
-        c_lo = max(cmin, rmin + offsets[k])
-        c_hi = min(cmax, rmax + offsets[k])
-        for c in c_lo:c_hi
-            cc = c - cmin + 1
-            rowval[colptr[cc]] = c - offsets[k] - rmin + 1
-            colptr[cc] += 1
+    k_last = K
+    while k_last >= k_first && offsets[k_last] < cmin - rmax
+        k_last -= 1
+    end
+
+    # Total nnz from precomputed bounds.
+    total = 0
+    for k in k_first:k_last
+        total += hi_p1[k] - lo[k]
+    end
+    resize!(rowval, total)
+
+    # Two-pointer segment walk over the precomputed event arrays. Sentinel
+    # sits beyond any valid event column (≤ cmax + 1).
+    sentinel = cmax + 2
+    i_lo = k_last
+    i_hi = k_last
+    prev = cmin
+    cur = 1
+    while i_lo >= k_first || i_hi >= k_first
+        pos_lo = i_lo >= k_first ? lo[i_lo]    : sentinel
+        pos_hi = i_hi >= k_first ? hi_p1[i_hi] : sentinel
+        e = min(pos_lo, pos_hi)
+        active = i_hi - i_lo
+        k_a = i_lo + 1
+        for c in prev:(e - 1)
+            colptr[c - cmin + 2] = cur + active * (c - prev + 1)
         end
+        for c in prev:(e - 1), k in k_a:i_hi
+            rowval[cur + active * (c - prev) + (k - k_a)] = c - offsets[k] - rmin + 1
+        end
+        cur += active * (e - prev)
+        prev = e
+        pos_lo == e && (i_lo -= 1)
+        pos_hi == e && (i_hi -= 1)
     end
-    # Phase 4 — restore colptr to the CSC offset table by shifting right by 1.
-    for j in n+1:-1:2
-        colptr[j] = colptr[j-1]
+    # Tail (active = 0 once all events have fired): fill remaining colptr.
+    for c in prev:cmax
+        colptr[c - cmin + 2] = cur
     end
-    colptr[1] = 1
     return
 end
 
 """
-    _fill!(nzval, colptr, offsets, coefs, row, col)
+    _fill!(nzval, offsets, coefs, row, col)
 
-1-D fill kernel. Same `K`-outer-loops shape as [`_pattern!`](@ref): for each
-offset `k`, sweep its c-range and write `nzval[slot] = coefs[k][c]`, using
-`colptr` as the per-column slot tracker (mutated in place, then restored
-by a shift-right pass at the end).
+1-D fill kernel. Same segment walk as [`_pattern!`](@ref): the slot
+positions for `nzval` are a pure closed-form function of `(c, k)` within
+each constant-active segment, so `colptr` is not consulted and the
+matrix is consistent throughout the call.
+
+For each constant-active segment with start column `prev`, start slot
+`cur`, slope `active`, and active offsets `k_a:i_hi`:
+
+    nzval[cur + active * (c − prev) + (k − k_a)] = coefs[k][c]
 
 Allocation-free apart from whatever `getindex` on the user's coef arrays
 costs (`Vector`, `Fill`, `OffsetArray` etc. are O(1)).
-
-Carries the same single-threaded / mid-fill caveat as `_pattern!` — `colptr`
-is briefly inconsistent during the fill phase and restored at the end.
 """
 function _fill!(
     nzval::AbstractVector{T},
-    colptr::Vector{Int},
     offsets::NTuple{K,Int},
     coefs::NTuple{K,AbstractArray{T,1}},
     row::AbstractUnitRange{Int},
@@ -190,22 +217,38 @@ function _fill!(
 ) where {K,T}
     rmin, rmax = first(row), last(row)
     cmin, cmax = first(col), last(col)
-    n = length(col)
-    # Fill — mutate colptr as the slot tracker.
-    for k in 1:K
-        c_lo = max(cmin, rmin + offsets[k])
-        c_hi = min(cmax, rmax + offsets[k])
-        for c in c_lo:c_hi
-            cc = c - cmin + 1
-            nzval[colptr[cc]] = coefs[k][c]
-            colptr[cc] += 1
+
+    lo    = ntuple(k -> max(cmin, rmin + offsets[k]),     Val(K))
+    hi_p1 = ntuple(k -> min(cmax, rmax + offsets[k]) + 1, Val(K))
+
+    k_first = 1
+    while k_first <= K && offsets[k_first] > cmax - rmin
+        k_first += 1
+    end
+    k_last = K
+    while k_last >= k_first && offsets[k_last] < cmin - rmax
+        k_last -= 1
+    end
+
+    sentinel = cmax + 2
+    i_lo = k_last
+    i_hi = k_last
+    prev = cmin
+    cur = 1
+    while i_lo >= k_first || i_hi >= k_first
+        pos_lo = i_lo >= k_first ? lo[i_lo]    : sentinel
+        pos_hi = i_hi >= k_first ? hi_p1[i_hi] : sentinel
+        e = min(pos_lo, pos_hi)
+        active = i_hi - i_lo
+        k_a = i_lo + 1
+        for c in prev:(e - 1), k in k_a:i_hi
+            nzval[cur + active * (c - prev) + (k - k_a)] = coefs[k][c]
         end
+        cur += active * (e - prev)
+        prev = e
+        pos_lo == e && (i_lo -= 1)
+        pos_hi == e && (i_hi -= 1)
     end
-    # Restore colptr by shifting right by 1.
-    for j in n+1:-1:2
-        colptr[j] = colptr[j-1]
-    end
-    colptr[1] = 1
     return
 end
 
@@ -258,7 +301,7 @@ function update!(
     row::NTuple{1,AbstractUnitRange{Int}},
     col::NTuple{1,AbstractUnitRange{Int}},
 ) where {T,K}
-    _fill!(mat.nzval, mat.colptr, st.offsets, st.coefs, row[1], col[1])
+    _fill!(mat.nzval, st.offsets, st.coefs, row[1], col[1])
     return mat
 end
 

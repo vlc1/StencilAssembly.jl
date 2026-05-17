@@ -53,7 +53,7 @@ end
         rowval = Int[]
         _pattern!(rowval, colptr, offsets, row, col)
         nzval = Vector{Float64}(undef, length(rowval))
-        _fill!(nzval, colptr, offsets, coefs, row, col)
+        _fill!(nzval, offsets, coefs, row, col)
         @test nzval == [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]
     end
 end
@@ -123,6 +123,64 @@ end
         J_exp = [1, 1, 2, 2, 3, 3, 4]
         V_exp = [1/ρ[1], -1/ρ[2], 1/ρ[2], -1/ρ[3], 1/ρ[3], -1/ρ[4], 1/ρ[4]]
         ref = sparse(I_exp, J_exp, V_exp, 4, 4)
+        @test J == ref
+    end
+end
+
+@testset "edge cases (segment-walk kernels)" begin
+    @testset "K=0: empty offsets" begin
+        row = 1:5; col = 1:5
+        colptr = Vector{Int}(undef, 6); colptr[1] = 1
+        rowval = Int[]
+        _pattern!(rowval, colptr, (), row, col)
+        @test colptr == [1, 1, 1, 1, 1, 1]
+        @test rowval == Int[]
+        nzval = Float64[]
+        _fill!(nzval, (), (), row, col)
+        @test nzval == Float64[]
+    end
+
+    @testset "all offsets out of range: row=col=1:3, offsets=(10, 5)" begin
+        row = 1:3; col = 1:3
+        offsets = (10, 5)
+        colptr = Vector{Int}(undef, 4); colptr[1] = 1
+        rowval = Int[]
+        _pattern!(rowval, colptr, offsets, row, col)
+        @test colptr == [1, 1, 1, 1]
+        @test rowval == Int[]
+    end
+
+    @testset "partial out of range: row=col=(1:3,), offsets=(3, 0, -3)" begin
+        # offsets[1]=3 > cmax-rmin=2  → trimmed (prefix).
+        # offsets[3]=-3 < cmin-rmax=-2 → trimmed (suffix).
+        # Only offset 0 survives; coefs at trimmed slots are never read.
+        row = (1:3,); col = (1:3,)
+        st = LinearStencil{1}((3, 0, -3), (Fill(1.0, 3), Fill(2.0, 3), Fill(3.0, 3)))
+        J = assemble(st, row, col); update!(J, st, row, col)
+        ref = stencil_reference(
+            (CartesianIndex(3), CartesianIndex(0), CartesianIndex(-3)),
+            (1.0, 2.0, 3.0), row, col)
+        @test J == ref
+    end
+
+    @testset "disjoint row/col, bridging offsets: row=(1:5,), col=(100:105,)" begin
+        row = (1:5,); col = (100:105,)
+        st = LinearStencil{1}((100, 99), (Fill(1.0, 105), Fill(-1.0, 105)))
+        J = assemble(st, row, col); update!(J, st, row, col)
+        ref = stencil_reference(
+            (CartesianIndex(100), CartesianIndex(99)),
+            (1.0, -1.0), row, col)
+        @test J == ref
+    end
+
+    @testset "coincident events: row=col=(1:10,), offsets=(5, 4)" begin
+        # Both c_hi clip to cmax=10 → two hi events coincide at column 11.
+        row = (1:10,); col = (1:10,)
+        st = LinearStencil{1}((5, 4), (Fill(1.0, 10), Fill(-1.0, 10)))
+        J = assemble(st, row, col); update!(J, st, row, col)
+        ref = stencil_reference(
+            (CartesianIndex(5), CartesianIndex(4)),
+            (1.0, -1.0), row, col)
         @test J == ref
     end
 end

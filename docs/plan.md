@@ -30,18 +30,24 @@ Implemented:
   `NTuple{1, AbstractUnitRange{Int}}`. `assemble`/`update!` pin both
   `D = 1` and `N = 1` at the type level (pure dispatch). `build` is the
   one-shot `update!(assemble(...), ...)` convenience.
-- 1-D kernels `_pattern!` and `_fill!` structured as `K` outer loops, one
-  per offset; each loop sweeps the c-range where its offset produces an
-  in-range row. Per-column "next free slot" is tracked by mutating
-  `colptr` in place (counting-sort-CSC), then restored by a shift-right
-  pass. Allocation-free, no helper, no per-cell branching.
-- Test suite (31 assertions): constructor validation, `_pattern!`/`_fill!`
+- 1-D kernels `_pattern!` and `_fill!` structured as a segment walk
+  over the piecewise-constant per-column nnz count
+  `q(c) = #{k : c_lo_k ≤ c ≤ c_hi_k}`. Two-pointer merge of lo / hi
+  event streams (non-decreasing because offsets are strictly descending);
+  empty c-ranges trimmed up front in `O(K)`. Within each constant-active
+  segment every `colptr` / `rowval` / `nzval` write is a **closed-form
+  pure function** of the loop indices — no read-modify-write, no
+  sequential dependency, no mid-call `colptr` corruption. `_fill!` does
+  not touch `mat.colptr`. Allocation-free; `_pattern!` resizes `rowval`
+  once to the analytic nnz.
+- Test suite (39 assertions): constructor validation, `_pattern!`/`_fill!`
   direct kernel tests on equal and shifted ranges, integration tests for
   forward / backward / central x-differences against `stencil_reference`
   (range-based brute-force oracle), Float32 element type, unequal-length
   and shifted-range cases, variable-coefficient density-weighted gradient,
-  `D ≤ N` constructor invariant, N-mismatch dispatch rejection, and `build`
-  smoke test.
+  segment-walk edge cases (`K = 0`, all/partial out-of-range offsets,
+  disjoint row/col, coincident events), `D ≤ N` constructor invariant,
+  N-mismatch dispatch rejection, and `build` smoke test.
 
 Deliberately not exported / not shipped:
 
@@ -165,11 +171,10 @@ covered range shapes.
 
 - Strict-descending offset order is intrinsic to CSC sortedness and is
   validated at the `LinearStencil` constructor boundary. Don't relax
-  it without also accepting an explicit sort step. The K-outer-loops
-  emission order depends on it (k-ascending → row-ascending).
-- The K-outer-loops kernels mutate `colptr` in place during the fill
-  phase, then restore it. Single-threaded use only; an interruption
-  between fill and restore leaves `colptr` inconsistent.
+  it without also accepting an explicit sort step. The segment-walk
+  event streams (lo at `c_lo_k`, hi at `c_hi_k + 1`) rely on it being
+  non-increasing in `k`, and the in-segment slot ordering
+  (`k − k_a` ascending) gives the row-ascending CSC invariant.
 - The package does **not** depend on `CartesianRuns`. Row and col are
   rectangular subsets on a shared integer mesh; coherence of the
   shared-mesh interpretation is the caller's responsibility.
@@ -177,5 +182,7 @@ covered range shapes.
   (`Base.front` / `last`, separate methods for `NTuple{1, …}` base
   and `NTuple{Nd, …}` recursive) over passing `Val{N}` or runtime
   `Nd` indices around. Accumulators returned as `Tuple`s, no `Ref`s.
-  The K-outer-loops shape generalises naturally — each `k` becomes a
-  sub-stencil with a rectangular c-range.
+  The segment-walk shape generalises naturally — at each level the
+  active k-range is a function of the dim-`D` projection only, so the
+  segment walk runs once per outer-product position with closed-form
+  slot offsets across `c_1, …, c_{D−1}, c_{D+1}, …, c_N`.
