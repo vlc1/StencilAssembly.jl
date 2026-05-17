@@ -3,10 +3,9 @@
 ## Project goal
 
 Build a Julia package that assembles `SparseMatrixCSC` operators for stencil
-patterns on masked Cartesian meshes, where row and column masks are
-`CartesianRuns.CartesianRunIndices{N}`. Sparsity pattern and numerical fill are
-exposed as separate operations; the fill is allocation-free up to a small
-constant-size buffer.
+patterns on rectangular Cartesian meshes, where row and column index sets are
+`NTuple{N, AbstractUnitRange{Int}}`. Sparsity pattern and numerical fill are
+exposed as separate operations; both are allocation-free at the kernel level.
 
 - Package name: **`CartesianOperators.jl`**.
 - Forward-looking plan: [`docs/plan.md`](docs/plan.md).
@@ -17,10 +16,10 @@ constant-size buffer.
 | File                          | Role                                                          |
 | ----------------------------- | ------------------------------------------------------------- |
 | `src/CartesianOperators.jl`   | Module entry; imports; `include`s; exports                    |
-| `src/stencil.jl`              | `LinearStencil`, `assemble`, `update!`, 1-D pointer kernels   |
+| `src/stencil.jl`              | `LinearStencil`, `assemble`, `update!`, `build`, 1-D kernels  |
 | `test/runtests.jl`            | Test suite entry (run via `Pkg.test()`)                       |
 | `test/reference.jl`           | Brute-force `stencil_reference` helper                        |
-| `test/oracle.jl`              | `spdiagm`-based naive cross-check oracle                      |
+| `test/oracle.jl`              | Standalone cross-check script (not in `Pkg.test()`)           |
 | `test/test_stencil.jl`        | LinearStencil + assemble + update! test sets                  |
 
 ## Sticky decisions (do not re-litigate)
@@ -33,45 +32,57 @@ The package's main abstraction is
 - `D::Int` — mesh dimension the stencil acts on (1-based).
 - `K::Int` — number of stencil terms.
 - `T` — shared element type of every coef array.
-- `N` — coef-array dimensionality; matches `CartesianRunIndices{N}` at
-  assembly time.
+- `N` — coef-array dimensionality; matches the row/col
+  `NTuple{N, AbstractUnitRange{Int}}` at assembly time.
 - `offsets::NTuple{K,Int}` — strictly descending 1-D offsets along dim `D`.
 - `coefs::C` — `NTuple{K,<:AbstractArray{T,N}}` of coefficient arrays.
   Heterogeneous containers (e.g. `Fill` + `Vector` + `OffsetArray`) are
   fine as long as they share `eltype` and `ndims`.
 
 The inner constructor `LinearStencil{D}(offsets, coefs)` (well-typed path)
-validates `D ≥ 1` and strict-descending offsets (`issorted(offsets; lt = >=)`).
-A catch-all outer constructor `LinearStencil{D}(::Tuple, ::Tuple)` reports
-friendly `ArgumentError`s for ill-typed inputs (length mismatch, non-`Int`
-offsets, non-`AbstractArray` coefs, mixed `eltype`, mixed `ndims`). The
-shared `eltype` and `ndims` of well-typed coefs are enforced at the method
+validates `D ≥ 1`, `D ≤ N` (stencil dim must fit within coef-array dims),
+and strict-descending offsets (`issorted(offsets; lt = >=)`). A catch-all
+outer constructor `LinearStencil{D}(::Tuple, ::Tuple)` reports friendly
+`ArgumentError`s for ill-typed inputs (length mismatch, non-`Int` offsets,
+non-`AbstractArray` coefs, mixed `eltype`, mixed `ndims`). The shared
+`eltype` and `ndims` of well-typed coefs are enforced at the method
 signature, not in the constructor body.
 
-Two operations:
+Three operations:
 
-- `assemble(st, row, col, ::Type{SparseMatrixCSC{T,Int}} = SparseMatrixCSC{T,Int})`
-  — builds `colptr`/`rowval`; allocates `nzval` (uninitialised).
+- `assemble(st, row, col)` — builds `colptr`/`rowval`; allocates `nzval`
+  (uninitialised).
 - `update!(mat, st, row, col) -> mat` — writes `nzval` in place; allocation-
-  free apart from a `K`-element scratch buffer and whatever `getindex` on
-  the user's coef arrays costs (`Vector`, `Fill`, `OffsetArray` are O(1)).
+  free apart from whatever `getindex` on the user's coef arrays costs
+  (`Vector`, `Fill`, `OffsetArray` are O(1)).
+- `build(st, row, col)` — convenience for `update!(assemble(st, row, col), st, row, col)`;
+  returns a fully populated matrix in one shot.
 
-The trailing `::Type` argument on `assemble` is positional for future matrix-
-format extension; v1 supports only `SparseMatrixCSC{T,Int}`.
+For 1-D, `assemble` / `update!` pin both `D = 1` and `N = 1` at the type
+level; misuse turns into `MethodError`. The `D ≤ N` invariant at the
+constructor catches the most common misuse (e.g. `LinearStencil{2}` with
+1-D coefs) earlier with a friendly `ArgumentError`.
+
+### Row/col representation: rectangular ranges on a shared mesh
+
+`row` and `col` are `NTuple{N, AbstractUnitRange{Int}}` interpreted on a
+*single shared* integer mesh — there is no separate "row mesh" or "column
+mesh" coordinate system, only rectangular sub-blocks of the same mesh. They
+may overlap fully, partially, or not at all; they may be unequal in length
+or start at different positions (e.g. `row = (1:5,)`, `col = (3:7,)`).
+
+The matrix size is `prod(length, row) × prod(length, col)`. The compact row
+index for mesh position `r` is `r − first(row[d]) + 1` per dimension
+(column-major), and analogously for column.
 
 ### Coefficient indexing: column anchor on the shared mesh
 
-`row` and `col` `CartesianRunIndices` are interpreted on a *single shared*
-integer mesh — there is no separate "row mesh" or "column mesh" coordinate
-system, only different active subsets. Each `coefs[k]` is an
-`AbstractArray{T,N}` that lives on that shared mesh and is indexed by a
-`CartesianIndex{N}` mesh position.
-
-At each emission, the kernel has both the column's mesh position `c_idx`
-and the row's mesh position `r_idx = c_idx − Δ_idx`. By convention it
-reads `coefs[k][c_idx]` — the **column anchor**. The choice is symmetric
-in cost (the kernel computes `r_idx` anyway for row-pointer arithmetic)
-and matches the CSC sweep order where the column index is the outer loop.
+Each `coefs[k]` is an `AbstractArray{T,N}` indexed by a `CartesianIndex{N}`
+mesh position. At each emission, the kernel has both the column's mesh
+position `c_idx` and the row's mesh position `r_idx = c_idx − Δ_idx`. By
+convention it reads `coefs[k][c_idx]` — the **column anchor**. The choice
+is symmetric in cost and matches the CSC sweep order where the column
+index is the outer loop.
 
 For non-square operators (e.g., staggered grids, restriction operators)
 the coef "naturally" attached to row position `r_idx` for some slots must
@@ -93,31 +104,35 @@ entry lands on the row at mesh position `p_c − Δ`. Stencil offsets are 1-D
 
 ### Boundary policy
 
-Stencil offset → column outside `col` ⇒ that single `(row, col)` entry is
-dropped. Rows are sourced from `row` so off-mask rows are never emitted.
+Stencil offset → row outside `row` ⇒ that single `(row, col)` entry is
+dropped. Columns are sourced from `col` so off-mesh columns are never
+visited.
 
-### CartesianRunIndices surface we depend on
+### Kernel shape: K outer loops + mutate-restore-colptr
 
-`CartesianRunIndices` is treated as a minimal value carrying only:
+`_pattern!` and `_fill!` are structured as `K` outer loops, one per offset.
+For each `k`, the c-range where offset `k` produces an in-range row is
 
-- `cri.intervals::NTuple{N,<:AbstractVector{Interval}}`
-- `cri.offsets::NTuple{N-1,<:AbstractVector{Int}}` (empty tuple for `N = 1`)
-- `length(cri)` (compact-space size)
-- `iterate(cri)` / `cri[k]` (used only in test oracles, never in kernels)
+    c_lo_k = max(first(col), rmin + offsets[k])
+    c_hi_k = min(last(col), rmax + offsets[k])
 
-We deliberately do **not** depend on `domain(cri)` or a `domain` field — those
-no longer exist on the current CartesianRuns `main` (the `ghost` branch was
-merged and deleted). The kernels work on raw mesh integers extracted from
-`Interval.mask` ranges and `shift(::Interval)`; the matrix structure is
-determined by these alone. `row` and `col` are interpreted on a shared
-integer mesh, and the caller owns the coherence of that interpretation.
+— computed once per `k`, not once per `c`. The kernels then sweep
+`c_lo_k:c_hi_k` and emit unconditionally, with no per-cell branching.
 
-### Pointer-based sweep, no `Base.in` / `getindex`
+Per-column "next free slot" is tracked by mutating `colptr` in place during
+the fill phase, then restored to the proper CSC offset table by a
+shift-right pass at the end. Classic counting-sort-CSC; allocation-free.
 
-Kernels walk `cri.intervals[d]` directly with pointers (one for col, one per
-stencil offset on row). Compact indices come from `Interval.shift` via range
-arithmetic. Mirrors `_intersect_runs!` / `_intersect_fused!` from
-CartesianRuns.
+CSC sortedness holds because strict-descending offsets give
+`r_k = c − offsets[k]` ascending in `k`, so processing `k = 1, …, K` in
+order means within any column the writes happen in k-ascending →
+row-ascending. No sort step.
+
+Caveat: during Phase 3 of `_pattern!` and during the fill phase of
+`_fill!`, `colptr[j]` holds the *next-free-slot* for column `j`, not the
+column start. The final shift-right pass restores it. Single-threaded use
+only; an interruption between fill and restore would leave `colptr`
+inconsistent.
 
 ### Offset ordering for CSC sortedness
 
@@ -130,31 +145,27 @@ flip to ascending.
 
 ## Conventions
 
-- 1-D base kernel name pattern: `_pattern_runs!`, `_fill_runs!` (dim-agnostic
-  — they take whatever interval vector and offsets they're handed).
-- N-D recursive kernel name pattern (deferred): `_pattern_fused!`,
-  `_fill_fused!`.
-- Public API: `LinearStencil`, `assemble`, `update!`.
+- 1-D kernel name pattern: `_pattern!`, `_fill!`.
+- N-D recursive kernel name pattern (deferred): tuple-length dispatch via
+  `Base.front` / `last`; accumulators returned as `Tuple`s, no `Ref`s.
+- Public API: `LinearStencil`, `assemble`, `update!`, `build`.
 - Run tests: `julia --project=. -e 'using Pkg; Pkg.test()'` from package root.
 
 ## Scope
 
-Implemented: `LinearStencil{D,K,T,N,C}` constructor (any `D`, any `N`) with
-variable coefficients as `AbstractArray{T,N}`; `assemble` and `update!` for
-1-D dispatch only (`LinearStencil{D,K,T,1}` against `CartesianRunIndices{1}`
-→ `SparseMatrixCSC{T,Int}`).
+Implemented: `LinearStencil{D,K,T,N,C}` constructor (any `1 ≤ D ≤ N`) with
+variable coefficients as `AbstractArray{T,N}`; `assemble`, `update!`, and
+`build` for 1-D dispatch only (`LinearStencil{1,K,T,1}` against
+`NTuple{1, AbstractUnitRange{Int}}` → `SparseMatrixCSC{T,Int}`).
 
 Next milestone (see [`docs/plan.md`](docs/plan.md) for the design):
 
-- **N-D dispatch** — `CartesianRunIndices{N}` × `LinearStencil{D,K,T,N}` with
-  `1 ≤ D ≤ N` via recursive dimensional-peeling kernels
-  (`_pattern_fused!`, `_fill_fused!`). The new kernels branch on `Nd vs
-  D` and bottom out at `_pattern_runs!` / `_pattern_runs_intersect!`
-  depending on whether the base case is the stencil dim or an inner
-  intersection dim.
+- **N-D dispatch** — `NTuple{N, AbstractUnitRange{Int}}` × `LinearStencil{D,K,T,N}`
+  with `1 ≤ D ≤ N` via recursive dimensional-peeling kernels using
+  tuple-length dispatch (`Base.front` / `last`). Branches at each level
+  on `Nd vs D`; bottoms out at the 1-D kernel. No `Ref`s — accumulators
+  are returned as `Tuple`s.
 
-Further deferred milestones (sketched in the plan): composition (e.g.,
-Laplacian as a sum of `LinearStencil`s), non-`SparseMatrixCSC` matrix
-targets (`BandedMatrix`, dense), and a contiguous-offset kernel fast path
-(single row-pointer march per cell when offsets form a contiguous descending
-range).
+Further deferred milestones: composition (e.g., Laplacian as a sum of
+`LinearStencil`s), non-`SparseMatrixCSC` matrix targets (`BandedMatrix`,
+dense).

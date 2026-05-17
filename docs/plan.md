@@ -1,263 +1,137 @@
 # CartesianOperators implementation plan
 
-Forward-looking; updated after the variable-coefficient refactor.
-For the "why" behind the abstractions, see
+Forward-looking; updated after the move from `CartesianRunIndices` to rectangular
+`NTuple{N, AbstractUnitRange{Int}}` row/col representations.
+For the historical type-driven API design, see
 [`docs/superpowers/specs/2026-05-12-cartesian-operators-design.md`](superpowers/specs/2026-05-12-cartesian-operators-design.md).
 The original task-by-task plan at
 [`docs/superpowers/plans/2026-05-12-phase0-phase1.md`](superpowers/plans/2026-05-12-phase0-phase1.md)
-is historical; it was overtaken by the move to a type-driven API.
+is historical; superseded.
 
 ## Status
 
 Implemented:
 
-- `LinearStencil{D,K,T,N,C<:NTuple{K,AbstractArray{T,N}}}` —
-  variable-coefficient stencil aligned with mesh dimension `D`. Coefs are
-  `AbstractArray{T,N}` (heterogeneous containers allowed: `Fill` + `Vector`
-  + `OffsetArray` etc., as long as shared `eltype` and `ndims`). Inner
-  constructor (well-typed path) validates `D ≥ 1` and strict-descending
-  offsets via `issorted(offsets; lt = >=)`; shared `eltype`/`ndims` are
-  enforced by the method signature. A catch-all outer constructor reports
-  friendly `ArgumentError`s for ill-typed inputs.
+- `LinearStencil{D,K,T,N,C<:NTuple{K,AbstractArray{T,N}}}` — variable-
+  coefficient stencil. Coefs are `AbstractArray{T,N}` (heterogeneous
+  containers allowed: `Fill` + `Vector` + `OffsetArray` etc., as long as
+  shared `eltype` and `ndims`). Inner constructor validates `D ≥ 1`,
+  `D ≤ N`, and strict-descending offsets via `issorted(offsets; lt = >=)`;
+  shared `eltype`/`ndims` enforced at the method signature. A catch-all
+  outer constructor reports friendly `ArgumentError`s for ill-typed inputs.
+- **Range-based row/col**: row and col are
+  `NTuple{N, AbstractUnitRange{Int}}` interpreted on a shared integer
+  mesh; matrix size is `prod(length, row) × prod(length, col)`.
 - Column-anchor coefficient convention: kernel reads `coefs[k][c_idx]` at
-  each emission. `c_idx` and `r_idx = c_idx − Δ_idx` are both mesh
-  positions on the *shared* mesh that `row` and `col` cri's live on.
-- `assemble(st, row, col, ::Type{SparseMatrixCSC{T,Int}} = …)` and
-  `update!(mat, st, row, col)` for `LinearStencil{D,K,T,1}` against
-  `CartesianRunIndices{1}`.
-- Pointer-sweep kernels `_pattern_runs!` and `_fill_runs!` (1-D base; do
-  not call `Base.in` or `getindex` on the cri). `_fill_runs!` reads
-  `coefs[k][c]` at each emission (column anchor).
-- Test suite (29 assertions): constructor validation (inner + outer
-  friendly errors), 1-D kernel direct tests, integration tests for
-  forward / backward / central x-differences against `stencil_reference`,
-  Float32 element type, a variable-coefficient density-weighted gradient,
-  and `D ≠ 1` dispatch rejection.
-- Cross-check oracle in `test/oracle.jl`: three independent correctness
-  routes (pointer-sweep kernel via `assemble`+`update!`, dictionary-based
-  `stencil_reference`, `spdiagm`-based `stencil_naive_x`) agree on random
-  masks.
+  each emission. `c_idx ∈ CartesianIndices(col)`; user is responsible for
+  coef axes covering `col` (wrap with `OffsetArray` when needed).
+- `assemble(st, row, col)`, `update!(mat, st, row, col)`, and
+  `build(st, row, col)` for `LinearStencil{1,K,T,1}` against
+  `NTuple{1, AbstractUnitRange{Int}}`. `assemble`/`update!` pin both
+  `D = 1` and `N = 1` at the type level (pure dispatch). `build` is the
+  one-shot `update!(assemble(...), ...)` convenience.
+- 1-D kernels `_pattern!` and `_fill!` structured as `K` outer loops, one
+  per offset; each loop sweeps the c-range where its offset produces an
+  in-range row. Per-column "next free slot" is tracked by mutating
+  `colptr` in place (counting-sort-CSC), then restored by a shift-right
+  pass. Allocation-free, no helper, no per-cell branching.
+- Test suite (31 assertions): constructor validation, `_pattern!`/`_fill!`
+  direct kernel tests on equal and shifted ranges, integration tests for
+  forward / backward / central x-differences against `stencil_reference`
+  (range-based brute-force oracle), Float32 element type, unequal-length
+  and shifted-range cases, variable-coefficient density-weighted gradient,
+  `D ≤ N` constructor invariant, N-mismatch dispatch rejection, and `build`
+  smoke test.
 
 Deliberately not exported / not shipped:
 
 - Named convenience constants (`forward_x`, etc.). Callers construct
   `LinearStencil{1}((1, 0), (Fill(1.0, n), Fill(-1.0, n)))` inline.
-- `domain(cri)` access. The package treats `CartesianRunIndices` as
-  carrying only `intervals`, `offsets`, and the `length`/iteration
-  interface (see `AGENTS.md`).
 - Scalar-coef sugar. The constructor takes `AbstractArray`s only; users
   wrap constants in `FillArrays.Fill`.
+- `CartesianRunIndices` / arbitrary-mask support. Row and col are
+  rectangular by design; arbitrary masks are not representable.
 
 ## Roadmap
 
 ### Next milestone — N-D dispatch
 
 Extend `assemble` / `update!` to `LinearStencil{D,K,T,N}` against
-`CartesianRunIndices{N}` for any `1 ≤ D ≤ N`. The stencil acts on mesh
-dim `D`; the remaining `N − 1` dims are "outer" with zero shift. The
-same code path handles every D — `D = 1` is x-aligned, `D = 2`
-y-aligned, and so on; the original Phase 1b (N-D x) and Phase 2 (y in
-N-D) collapse into one piece of work. The coef tuple's `N` parameter
-already matches the cri's `N` at the type level, so the method
-signature pins them together by type variable.
+`NTuple{N, AbstractUnitRange{Int}}` for any `1 ≤ D ≤ N`. The stencil
+acts on mesh dim `D`; the remaining `N − 1` dims are "outer" with zero
+shift. The same code path handles every D — `D = 1` is x-aligned,
+`D = 2` y-aligned, and so on; a single recursive kernel covers all
+`(N, D)` pairs.
 
-#### Kernel structure
+The plan is to implement in order, validating each step via tests:
 
-Two new recursive kernels mirror the dispatch style of CartesianRuns's
-`_intersect_fused!`. They take the `LinearStencil` directly (it carries
-`D` as a type parameter plus the offsets/coefs the kernels need — see
-"Decisions made" below):
+1. **2-D, `D = 1`** — stencil on dim 1, outer dim 2 is intersection.
+2. **2-D, `D = 2`** — stencil on dim 2, base dim 1 is intersection.
+3. **3-D, `D = 1`** — stencil on dim 1, outer dims 2 and 3 intersection.
+4. **3-D, `D = 2`** — stencil at middle dim.
+5. **3-D, `D = 3`** — stencil at outermost dim.
 
-```
-_pattern_fused!(rowval, colptr, st::LinearStencil{D},
-                row_ivs::NTuple{Nd}, row_offs, row_lo, row_hi,
-                col_ivs::NTuple{Nd}, col_offs, col_lo, col_hi)
+#### Kernel structure (recursive, tuple-length dispatch)
 
-_fill_fused!(nzval, colptr, st::LinearStencil{D}, coef_selected,
-             row_ivs::NTuple{Nd}, row_offs, row_lo, row_hi,
-             col_ivs::NTuple{Nd}, col_offs, col_lo, col_hi)
-```
+Two methods, mirroring `CartesianRuns`'s `_intersect_fused!` shape:
 
-At each recursion level, dispatch on `Nd` (current dim, equal to the
-tuple length) vs `D` (stencil dim from `st`'s type parameter):
+- **Recursive case** dispatches on `NTuple{Nd, AbstractUnitRange{Int}}`
+  for any `Nd ≥ 2`. Peels `last(row)` / `last(col)` and recurses with
+  `Base.front(row)` / `Base.front(col)`. Internal compile-time branch
+  on `Nd == D` chooses between **stencil sweep** (apply per-offset row
+  position at this dim) and **intersection sweep** (check `c ∈ row[Nd]`
+  with zero shift).
+- **Base case** dispatches on `NTuple{1, AbstractUnitRange{Int}}` —
+  the innermost dim-1 loop. Internal compile-time branch on `D == 1`
+  chooses between **stencil base** (the existing flat 1-D kernel) and
+  **intersection base** (per-`k` emission gated on threaded
+  per-`k` state).
 
-| `Nd` vs `D`           | Action                                                                 |
-|-----------------------|------------------------------------------------------------------------|
-| `Nd > D`              | Outer dim, intersection sweep (zero shift). Peel and recurse.          |
-| `Nd == D` (`Nd ≥ 2`)  | Stencil-applying outer sweep. For each offset `k`, peel and recurse.   |
-| `Nd < D` (`Nd ≥ 2`)   | Inner dim (only reached when `D > 1`). Intersection sweep. Recurse.    |
-| `Nd == 1`             | Base case (see below).                                                 |
+State threaded through the recursion: scalar accumulators
+(`partial_r_lin`, `partial_c_lin`, `active`) plus K-tuples
+(`active_per_k`, `r_D_lin_per_k`) that are identity above dim `D`, set
+at dim `D`, propagated below. No `Ref`s — accumulators that the inner
+recursion needs to advance (e.g. the compact column counter) are
+returned as `Tuple` elements.
 
-The "intersection outer sweep" is structurally identical to
-CartesianRuns's `_intersect_fused!` recursive case (two-pointer sweep
-on the dim-`Nd` interval vectors of row and col, computing inner slices
-via `_inner_slice`). The "stencil-applying outer sweep" is the same
-shape with an explicit per-offset pointer into the row-side intervals,
-shifted by `offsets[k]` in dim `Nd`.
-
-**Recursion order is load-bearing.** The kernels must peel the
-*outermost* dimension first (dim `N`, then `N-1`, …, down to dim `1` at
-the base case), so the innermost dim — which varies fastest in
-compact-column order — is enumerated last. This is what makes columns
-come out in compact-ascending order across the whole recursion, which
-in turn lets `colptr` be filled incrementally (`colptr[c+1] =
-colptr[c] + cnt`) without a post-hoc sort. Reversing the peel direction
-would silently break CSC's column ordering. This mirrors CartesianRuns's
-`_intersect_fused!`, which peels `last(intervals)` first.
-
-**`_inner_slice` is internal to CartesianRuns** (underscore-prefixed,
-not exported). The module file needs an explicit
-`using CartesianRuns: _inner_slice` alongside the existing
-`using CartesianRuns: Interval, shift`.
-
-#### Base case (`Nd == 1`)
-
-| `D == 1` | Existing `_pattern_runs!` / `_fill_runs!` (offset-applying 1-D base). |
-| `D > 1`  | New `_pattern_runs_intersect!` / `_fill_runs_intersect!`.            |
-
-The new intersection variants are simpler: two-pointer sweep on the
-dim-1 interval vectors, emitting at every overlap with the
-`coef_selected` value (fill) or just a row-compact index (pattern).
-They do not loop over offsets — by the time we reach the base case
-with `D > 1`, the offset choice was already made at dim `D`.
-
-Symmetric naming for clarity:
-- `_pattern_runs!`, `_fill_runs!` — offset-applying (existing).
-- `_pattern_runs_intersect!`, `_fill_runs_intersect!` — zero-shift (new).
-
-#### Coef threading (fill only)
-
-When `D > 1`, the offset `k` that selects a row at dim `D` is fixed by
-the outer-dim recursion. The inner recursion (dims `< D`) needs to
-write `coefs[k]` at the base. The `_fill_fused!` signature carries an
-extra `coef_selected::T` parameter, threaded down at `Nd ≠ D` levels
-and set at `Nd == D`.
-
-For `D == 1`, no threading needed — the existing `_fill_runs!` knows
-which `k` is in flight because it loops over offsets directly at the
-base.
-
-#### Type stability
-
-Both `Nd` (from the interval-tuple length) and `D` (from `st`'s
-`LinearStencil{D}` type parameter) are type-level integers. The
-`Nd vs D` branches in `_pattern_fused!` / `_fill_fused!` constant-fold
-during specialization; only the relevant branch generates code. Verify
-with `@code_warntype` after implementation.
-
-#### Implementation steps
-
-1. Write `_pattern_runs_intersect!` (1-D base, two-pointer intersection,
-   no offsets).
-2. Write `_fill_runs_intersect!` (same, writes `coef_selected` at each
-   overlap cell).
-3. Write `_pattern_fused!` (recursive N-D). Branches on `Nd vs D`; base
-   case dispatches to `_pattern_runs!` (D = 1) or
-   `_pattern_runs_intersect!` (D > 1).
-4. Write `_fill_fused!` (recursive N-D with `coef_selected` threading).
-5. Add N-D methods that delegate to the fused kernels. They mirror the
-   existing 1-D methods, with `CartesianRunIndices{N}` (any `N`) in
-   place of `CartesianRunIndices{1}` and the `D ≤ N` check replacing
-   the `D == 1` check:
-
-   ```julia
-   function assemble(
-       st::LinearStencil{D,K,T,N},
-       row::CartesianRunIndices{N},
-       col::CartesianRunIndices{N},
-       ::Type{SparseMatrixCSC{T,Int}} = SparseMatrixCSC{T,Int},
-   ) where {D,K,T,N}
-       D <= N || throw(ArgumentError(
-           "stencil dimension D=$D exceeds cri dimension N=$N"))
-       # build colptr/rowval via _pattern_fused!, allocate nzval
-   end
-
-   function update!(
-       mat::SparseMatrixCSC{T,Int},
-       st::LinearStencil{D,K,T,N},
-       row::CartesianRunIndices{N},
-       col::CartesianRunIndices{N},
-   ) where {D,K,T,N}
-       D <= N || throw(ArgumentError(
-           "stencil dimension D=$D exceeds cri dimension N=$N"))
-       # fill mat.nzval via _fill_fused!
-   end
-   ```
-
-   The existing `CartesianRunIndices{1}` methods stay as-is (more
-   specific; win dispatch for `N == 1`) — or are subsumed if the N-D
-   methods are written to also handle `N == 1` correctly, in which case
-   delete the 1-D methods. Decide during implementation; subsuming is
-   cleaner if the fused kernel's base case already covers `N == 1`.
-6. Tests (2-D and 3-D) for each `D ∈ 1..N`. Compare against
-   `stencil_reference` and the generalised oracle (next bullet).
-7. Generalise `test/oracle.jl`'s `stencil_naive_x` (currently 1-D, uses
-   `spdiagm`) to an N-D `stencil_naive` that builds the full dense
-   matrix via direct (row, col) mesh enumeration, then sparsifies.
-
-#### Decisions made
-
-- **`_pattern_runs_intersect!` is a standalone function**, not
-  `_pattern_runs!` invoked with `offsets = (0,)`. The reuse is tempting
-  but pays one extra loop iteration per cell and obscures intent;
-  standalone is clearer and predictably faster.
-- **Pass `st` (the `LinearStencil`), not a bare `Val{D}`.** The stencil
-  already carries `D` as a type parameter plus the offsets and coefs the
-  kernels need, so a single `st` argument replaces three (`Val{D}`,
-  `offsets`, `coefs`). The recursion still branches on the type-level
-  `D` and the tuple length `Nd`.
-- **N-D tests stay in `test/test_stencil.jl`** (append 2-D and 3-D
-  testsets) until the file crosses ~250 lines, at which point split into
-  `test/test_stencil_1d.jl` + `test/test_stencil_nd.jl`.
+Both `Nd == D` and `D == 1` are type-level booleans → constant-folded
+during specialization; only the relevant branch generates code per
+instantiation.
 
 #### File-level changes (anticipated)
 
 | File | Action |
 |------|--------|
-| `src/stencil.jl` | Add `_pattern_fused!`, `_fill_fused!`, `_pattern_runs_intersect!`, `_fill_runs_intersect!`, and N-D method dispatch for `assemble` / `update!`. |
+| `src/stencil.jl` | Add recursive `_pattern!`/`_fill!` methods on `NTuple{Nd, AbstractUnitRange{Int}}` for `Nd ≥ 2`, sharing the existing 1-D base. Add N-D `assemble` / `update!` / `build` methods on `NTuple{N, AbstractUnitRange{Int}}` for any `N`, pinning the `D ≤ N` invariant via dispatch. |
 | `test/test_stencil.jl` | Add 2-D and 3-D testsets per the implementation steps. |
-| `test/oracle.jl` | Add `stencil_naive` (N-D); keep `stencil_naive_x` (1-D) for the existing checks. |
-| `AGENTS.md` | Update Scope; flip "N-D deferred" → "N-D implemented". |
-| `README.md` | Update Status. |
-| `docs/plan.md` | Status section moves the N-D bullet from Roadmap to Implemented. |
+| `test/reference.jl` | Already N-D — no change needed. |
+| `AGENTS.md` | Flip Scope's "N-D deferred" → "N-D implemented". |
+| `docs/plan.md` | Move N-D bullet from Roadmap to Implemented. |
 
 ### Further milestones (sketched)
-
-#### Contiguous-offset kernel fast path
-
-When the stencil's offsets form a contiguous descending range (the typical
-shape `(N, N-1, …, 1, 0, -1, …, -N′)`), the K independent row-pointers in
-`_pattern_runs!` / `_fill_runs!` (and their N-D counterparts) collapse to a
-*single* row-pointer that marches forward through consecutive row positions
-per column-cell. Estimated speedup: small constant (< 2×) on the inner
-loop in 1-D; more pronounced at the N-D outer-dim level where the same
-saving accumulates over inner-dim recursion. Plumbing: a trait or alias on
-`LinearStencil` that detects "contiguous descending offsets" at compile time
-and dispatches to a specialized kernel; no public-API change. Defer until
-the N-D kernels exist and profiling motivates the work.
 
 #### Composition / Laplacian
 
 The discrete Laplacian on a Cartesian grid is `Δ = Σ_d ∂²/∂x_d²`. Two
 realisation paths:
 
-1. **Sum-of-matrices.** Build `LinearStencil{d}((-1,))` × backward-diff
-   chained with `LinearStencil{d}((+1,))` (or similar) per dim, then
-   sum the resulting `SparseMatrixCSC`s. Cheap to implement on top of
-   the N-D milestone; downside is repeated assembly traversals and
-   transient intermediate matrices.
-2. **Composite stencil type.** A new `CompositeStencil{N,...}` that
-   represents a sum of `LinearStencil{d}`s for various `d`. `assemble`
-   walks all stencils together, producing a single sparse matrix with
-   the merged sparsity pattern. More code (per-column merge of offset
-   sets) but a single matrix at the end.
+1. **Sum-of-matrices.** Build per-dim second-difference `LinearStencil`s,
+   assemble each into a `SparseMatrixCSC`, and sum. Cheap to implement
+   on top of the N-D milestone; downside is repeated assembly traversals
+   and transient intermediate matrices.
+2. **Composite stencil type.** A new `CompositeStencil{N,...}` representing
+   a sum of `LinearStencil{d}`s for various `d`. `assemble` walks all
+   stencils together, producing a single sparse matrix with the merged
+   sparsity pattern. More code (per-column merge of offset sets) but a
+   single matrix at the end.
 
 Decision: defer; pick when the consumer demands a particular shape.
 
 #### Other matrix targets
 
-`assemble`'s trailing `::Type{MT}` parameter is positional for future
-extension. Likely candidates:
+The trailing `::Type{MT}` parameter that used to live on `assemble` has
+been dropped (YAGNI). When a second matrix format actually motivates the
+API shape, re-introduce it then. Likely candidates:
 
 - `BandedMatrices.BandedMatrix` — fast direct solves for stencils with
   small width on a regular mesh; useful for 1-D problems.
@@ -266,31 +140,42 @@ extension. Likely candidates:
 Implementation: new method dispatched on the target type, sharing the
 kernel sweep but emitting into the target format's representation.
 
+#### GPU portability
+
+The range-based kernels and the planned recursive N-D variant are
+allocation-free at the kernel level and use only integer arithmetic
+plus `getindex` on coef arrays. Both translate naturally to GPU
+kernels with appropriate `CartesianIndex` parallelism. Concrete plan
+deferred until the N-D milestone is in.
+
 ## Verification approach
 
-Every milestone is verified through three independent routes:
+Every milestone is verified through two independent routes:
 
-1. **Unit tests** — direct calls on internal kernels with hand-computed
-   `colptr` / `rowval` expectations on small fixed masks.
-2. **Integration tests** — `assemble` + `update!` against
-   `stencil_reference` (dictionary-based brute-force, dim-agnostic).
-3. **Cross-check oracle** — `test/oracle.jl` builds a naive
-   reference from `spdiagm` (1-D) or N-D mesh enumeration (after the
-   N-D milestone) and compares against `assemble` + `update!` on
-   random masks.
+1. **Unit tests** — direct calls on internal kernels (`_pattern!`,
+   `_fill!`) with hand-computed expectations on small fixed ranges.
+2. **Integration tests** — `assemble` + `update!` (or `build`) against
+   the brute-force `stencil_reference` (range-based; dim-agnostic).
+   Cover equal-length, unequal-length, and shifted-range cases.
 
-All three must agree across forward / backward / central operators on
-both full and holed masks.
+Both must agree across forward / backward / central operators on the
+covered range shapes.
 
 ## Notes for future agents
 
-- The pointer-sweep style (`Base.in` / `getindex` are forbidden in the
-  kernels) is the package's performance core. Any new kernel must walk
-  `cri.intervals[d]` with pointers and compute compact indices via
-  `Interval.shift`. See `AGENTS.md`.
 - Strict-descending offset order is intrinsic to CSC sortedness and is
   validated at the `LinearStencil` constructor boundary. Don't relax
-  it without also accepting an explicit sort step.
-- The package does **not** depend on `domain(cri)`. Two cri's are
-  interpreted on a shared integer mesh; coherence is the caller's
-  responsibility.
+  it without also accepting an explicit sort step. The K-outer-loops
+  emission order depends on it (k-ascending → row-ascending).
+- The K-outer-loops kernels mutate `colptr` in place during the fill
+  phase, then restore it. Single-threaded use only; an interruption
+  between fill and restore leaves `colptr` inconsistent.
+- The package does **not** depend on `CartesianRuns`. Row and col are
+  rectangular subsets on a shared integer mesh; coherence of the
+  shared-mesh interpretation is the caller's responsibility.
+- For the upcoming N-D recursion, prefer tuple-length dispatch
+  (`Base.front` / `last`, separate methods for `NTuple{1, …}` base
+  and `NTuple{Nd, …}` recursive) over passing `Val{N}` or runtime
+  `Nd` indices around. Accumulators returned as `Tuple`s, no `Ref`s.
+  The K-outer-loops shape generalises naturally — each `k` becomes a
+  sub-stencil with a rectangular c-range.
