@@ -289,3 +289,35 @@ end
         @test J == ref
     end
 end
+
+@testset "assemble + update! 3-D" begin
+    @testset "3-D D=1, row=col=(1:3, 1:4, 1:5)" begin
+        row = (1:3, 1:4, 1:5); col = (1:3, 1:4, 1:5)
+        st = LinearStencil{1}(SUnitRange(0, 1), (Fill(-1.0, 3, 4, 5), Fill(1.0, 3, 4, 5)))
+        J = build(st, row, col)
+        # Offsets for D=1: (CartesianIndex(0,0,0), CartesianIndex(1,0,0))
+        offsets = (CartesianIndex(0, 0, 0), CartesianIndex(1, 0, 0))
+        ref = stencil_reference(offsets, (-1.0, 1.0), row, col)
+        @test J == ref
+    end
+
+    @testset "3-D D=2, row=col=(1:3, 1:4, 1:5)" begin
+        row = (1:3, 1:4, 1:5); col = (1:3, 1:4, 1:5)
+        st = LinearStencil{2}(SUnitRange(0, 1), (Fill(-1.0, 3, 4, 5), Fill(1.0, 3, 4, 5)))
+        J = build(st, row, col)
+        # Offsets for D=2: (CartesianIndex(0,0,0), CartesianIndex(0,1,0))
+        offsets = (CartesianIndex(0, 0, 0), CartesianIndex(0, 1, 0))
+        ref = stencil_reference(offsets, (-1.0, 1.0), row, col)
+        @test J == ref
+    end
+
+    @testset "3-D D=3, row=col=(1:3, 1:4, 1:5)" begin
+        row = (1:3, 1:4, 1:5); col = (1:3, 1:4, 1:5)
+        st = LinearStencil{3}(SUnitRange(0, 1), (Fill(-1.0, 3, 4, 5), Fill(1.0, 3, 4, 5)))
+        J = build(st, row, col)
+        # Offsets for D=3: (CartesianIndex(0,0,0), CartesianIndex(0,0,1))
+        offsets = (CartesianIndex(0, 0, 0), CartesianIndex(0, 0, 1))
+        ref = stencil_reference(offsets, (-1.0, 1.0), row, col)
+        @test J == ref
+    end
+end

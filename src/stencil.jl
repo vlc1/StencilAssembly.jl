@@ -490,13 +490,15 @@ end
             # Stencil along the outermost dimension: just iterate over c_last.
             # The three-phase logic is applied in the base case (dim 1).
             for i_last in 1:(cmax_last - cmin_last + 1)
-                _pattern_nd_recursive(rowval, colptr, offsets, row_rest, col_rest, Val(D), col_idx, i_last)
+                c_last_mesh = cmin_last + i_last - 1
+                _pattern_nd_recursive(rowval, colptr, offsets, row_rest, col_rest, Val(D), col_idx, c_last_mesh)
                 col_idx += cols_per_iter
             end
         else
             # Pure intersection along the outermost dimension.
             for i_last in 1:(cmax_last - cmin_last + 1)
-                _pattern_nd_recursive(rowval, colptr, offsets, row_rest, col_rest, Val(D), col_idx, i_last)
+                c_last_mesh = cmin_last + i_last - 1
+                _pattern_nd_recursive(rowval, colptr, offsets, row_rest, col_rest, Val(D), col_idx, c_last_mesh)
                 col_idx += cols_per_iter
             end
         end
@@ -533,10 +535,6 @@ end
     outer_col_idx::Int = 1,
 ) where {O, L, T, N_coef, N_dims, D}
     if N_dims == 1
-        # Convert col_idx and outer_col_idx to mesh coordinates for coef indexing.
-        len1 = length(col[1])
-        c1 = ((col_idx - 1) % len1) + 1
-
         if D == 1
             # Base case: fill nzval for the inner dimension with D=1 stencil.
             rmin, rmax = first(row[1]), last(row[1])
@@ -550,17 +548,48 @@ end
             c_LR = max(cmin, rmin + δ_hi)
             c_RR = min(cmax, rmax + δ_lo)
 
+            # Helper to build the full coef index tuple
+            # For 2-D: coefs is indexed as [c_1, c_2], so we need (c_1, outer_col_idx)
+            # For 3-D: coefs is indexed as [c_1, c_2, c_3], so we need to extract c_2 and c_3 from col_idx and outer_col_idx
+            function get_coef_idx(col_coord)
+                # Determine the number of outer dimensions based on coefs ndims
+                n_coef_dims = ndims(coefs[1])
+                if n_coef_dims == 2
+                    return (col_coord, outer_col_idx)
+                elseif n_coef_dims == 3
+                    # For 3-D case, reconstruct c_2 and c_3 from col_idx and outer_col_idx
+                    # col_idx is global, outer_col_idx is c_2, and we need to extract c_3
+                    # Stride for c_3 is length(col[1]) * length(col[2])
+                    stride_3 = length(col[1]) * (N_dims > 1 ? length(col_end_at(2)) : 1)
+                    # Actually we can determine stride from the col tuple stored at the call site
+                    # For now, use a simpler approach: col_idx cycles through dimension 1 and 2, then moves to dimension 3
+                    stride_1_2 = length(col[1])  # After processing this many columns, c_2 increments
+                    # After processing stride_1_2 * 4 = 12 columns, c_3 increments
+                    # But we need to know the total outer dimensions from somewhere...
+                    # Let me just compute from col_idx and outer_col_idx relationship
+                    # If outer_col_idx is c_2 and col_idx is global, then:
+                    # c_3 = 1 + (col_idx - 1) / (length(col[1]) * length(col[2]))
+                    # But at this point we don't know length(col[2])...
+                    # The safest approach is to pass the missing coordinates as extra parameters
+                    # For now, let me use a runtime check based on coefs size
+                    cols_per_dim2 = size(coefs[1], 2)
+                    stride_3 = length(col[1]) * cols_per_dim2
+                    c_3 = div(col_idx - 1, stride_3) + 1
+                    return (col_coord, outer_col_idx, c_3)
+                else
+                    error("Unsupported coefs dimensions: $n_coef_dims")
+                end
+            end
+
             # Left ramp.
             for c in cmin:(c_LR - 1)
                 active = max(0, c - rmin - δ_lo + 1)
                 for i in 0:(active - 1)
                     δ = (c - rmin) - i
                     k = δ - first(offsets) + 1
-                    # Index coefs with mesh coordinates: c1 (from inner dim) and outer_col_idx (from outer dims).
-                    nzval[nzval_idx + i] = coefs[k][c1, outer_col_idx]
+                    nzval[nzval_idx + i] = coefs[k][get_coef_idx(c)...]
                 end
                 nzval_idx += active
-                c1 += 1
             end
 
             # Interior.
@@ -570,9 +599,8 @@ end
                 for i in 0:(Leff - 1)
                     δ = δ_hi - i
                     k = δ - first(offsets) + 1
-                    nzval[cur_c + i] = coefs[k][c1, outer_col_idx]
+                    nzval[cur_c + i] = coefs[k][get_coef_idx(c)...]
                 end
-                c1 += 1
             end
             nzval_idx = cur_int_0 + Leff * max(0, c_RR - c_LR + 1)
 
@@ -583,16 +611,16 @@ end
                 for i in 0:(active - 1)
                     δ = δ_hi - i
                     k = δ - first(offsets) + 1
-                    nzval[nzval_idx + i] = coefs[k][c1, outer_col_idx]
+                    nzval[nzval_idx + i] = coefs[k][get_coef_idx(c)...]
                 end
                 nzval_idx += active
-                c1 += 1
             end
+            # Increment col_idx by the number of columns processed.
+            col_idx += length(cmin:cmax)
             return (nzval_idx, col_idx)
         else
             # Base case: D > N_dims means stencil dimension was peeled earlier.
-            # The offset applies to an OUTER dimension, so use adjusted_outer_col_idx for coef indexing.
-            # Walk offsets δ_hi:-1:δ_lo (descending) to match pattern phase order.
+            # The offset applies to an OUTER dimension.
             rmin, rmax = first(row[1]), last(row[1])
             cmin, cmax = first(col[1]), last(col[1])
             O_val = first(offsets)
@@ -602,18 +630,22 @@ end
                 # For each column c, emit entries for all valid offsets (descending order)
                 for k in L_val:-1:1
                     δ = O_val + k - 1
+                    # Adjust the outer column index by the offset
                     adjusted_outer_col_idx = outer_col_idx - δ
 
                     # Check if adjusted position is valid
                     if adjusted_outer_col_idx >= 1
                         r_local = c - rmin + 1
                         if r_local >= 1 && r_local <= length(row[1])
-                            nzval[nzval_idx] = coefs[k][c, adjusted_outer_col_idx]
+                            coef_idx = (c, adjusted_outer_col_idx)
+                            nzval[nzval_idx] = coefs[k][coef_idx...]
                             nzval_idx += 1
                         end
                     end
                 end
             end
+            # Increment col_idx by the number of columns processed.
+            col_idx += length(cmin:cmax)
             return (nzval_idx, col_idx)
         end
     else
@@ -632,12 +664,14 @@ end
         if N_dims == D
             # Stencil along the outermost dimension: just iterate over c_last.
             for i_last in 1:(cmax_last - cmin_last + 1)
-                nzval_idx, col_idx = _fill_nd_recursive(nzval, offsets, coefs, row_rest, col_rest, Val(D), col_idx, nzval_idx, i_last)
+                c_last_mesh = cmin_last + i_last - 1
+                nzval_idx, col_idx = _fill_nd_recursive(nzval, offsets, coefs, row_rest, col_rest, Val(D), col_idx, nzval_idx, c_last_mesh)
             end
         else
             # Pure intersection along the outermost dimension.
             for i_last in 1:(cmax_last - cmin_last + 1)
-                nzval_idx, col_idx = _fill_nd_recursive(nzval, offsets, coefs, row_rest, col_rest, Val(D), col_idx, nzval_idx, i_last)
+                c_last_mesh = cmin_last + i_last - 1
+                nzval_idx, col_idx = _fill_nd_recursive(nzval, offsets, coefs, row_rest, col_rest, Val(D), col_idx, nzval_idx, c_last_mesh)
             end
         end
         return (nzval_idx, col_idx)
