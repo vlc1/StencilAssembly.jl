@@ -311,6 +311,9 @@ function assemble(
     row::NTuple{N, AbstractUnitRange{Int}},
     col::NTuple{N, AbstractUnitRange{Int}},
 ) where {D, O, L, T, N}
+    # Guard: the three-phase kernel is exact only when the stencil width (L)
+    # doesn't exceed the size of the stencil dimension + 1. The guard checks
+    # length(row[D]) where D is the dimension being stenciled.
     L - 1 <= length(row[D]) || throw(ArgumentError(
         "stencil width L=$L exceeds length(row[$D])+1=$(length(row[D])+1); " *
         "the three-phase kernel is exact up to L = length(row) + 1, beyond which " *
@@ -318,7 +321,7 @@ function assemble(
     m, n = prod(length, row), prod(length, col)
     colptr = Vector{Int}(undef, n + 1); colptr[1] = 1
     rowval = Int[]
-    _pattern_nd!(rowval, colptr, st.offsets, row, col, Val(D), Val(N))
+    _pattern!(rowval, colptr, st.offsets, row, col, Val(D))
     nzval = Vector{T}(undef, length(rowval))
     SparseMatrixCSC{T, Int}(m, n, colptr, rowval, nzval)
 end
@@ -329,6 +332,9 @@ function update!(
     row::NTuple{N, AbstractUnitRange{Int}},
     col::NTuple{N, AbstractUnitRange{Int}},
 ) where {D, O, L, T, N}
+    # Guard: the three-phase kernel is exact only when the stencil width (L)
+    # doesn't exceed the size of the stencil dimension + 1. The guard checks
+    # length(row[D]) where D is the dimension being stenciled.
     L - 1 <= length(row[D]) || throw(ArgumentError(
         "stencil width L=$L exceeds length(row[$D])+1=$(length(row[D])+1); " *
         "the three-phase kernel is exact up to L = length(row) + 1, beyond which " *
@@ -345,32 +351,15 @@ innermost (first). At each level, branches on whether Nd == D (stencil
 sweep) or Nd ≠ D (pure intersection). Base case (Nd=1) dispatches to
 specialized 1-D handlers based on whether D == 1 or D > 1.
 """
-function _pattern_nd! end
-
-# Base case: Nd=1, D=1 (innermost dimension is the stencil dimension).
-function _pattern_nd!(
-    rowval::Vector{Int},
-    colptr::Vector{Int},
-    offsets::SUnitRange{O, L},
-    row::NTuple{1, AbstractUnitRange{Int}},
-    col::NTuple{1, AbstractUnitRange{Int}},
-    ::Val{1},
-    ::Val{1},
-) where {O, L}
-    # Use the existing 1-D kernel. colptr has size length(col)+1 and we fill it in place.
-    _pattern!(rowval, colptr, offsets, row[1], col[1])
-end
-
-# Base case: Nd=1, D>1 (shouldn't happen; D ≤ N invariant prevents it,
+# Base case: N=1, D>1 (shouldn't happen; D ≤ N invariant prevents it,
 # but include for completeness). This would be pure intersection.
-function _pattern_nd!(
+@inline function _pattern!(
     rowval::Vector{Int},
     colptr::Vector{Int},
     offsets::SUnitRange{O, L},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
     ::Val{D},
-    ::Val{1},
 ) where {O, L, D}
     # Pure intersection: for each column in col[1], emit a row iff it's in row[1].
     rmin, rmax = first(row[1]), last(row[1])
@@ -385,37 +374,19 @@ function _pattern_nd!(
     end
 end
 
-# Recursive case: Nd≥2, stencil dimension Nd==D (the peeled dim is the stencil dim).
-# Use a helper function that the compiler can inline to branch on Nd==D at compile time.
-
-# Recursive case: Nd≥2. Use two separate methods distinguished by Nd and D at compile time.
-# Julia's type system will select the right one based on whether Nd==D.
-
-function _pattern_nd!(
+# Recursive case: N≥2. Dispatches based on tuple length (compile-time constant).
+# Threads global column index and outer-dimension column coordinate through the recursion.
+@inline function _pattern!(
     rowval::Vector{Int},
     colptr::Vector{Int},
     offsets::SUnitRange{O, L},
-    row::NTuple{Nd, AbstractUnitRange{Int}},
-    col::NTuple{Nd, AbstractUnitRange{Int}},
-    ::Val{D},
-    ::Val{Nd},
-) where {O, L, Nd, D}
-    _pattern_nd_recursive(rowval, colptr, offsets, row, col, Val(D))
-end
-
-# Helper that dispatches based on tuple length at compile time.
-# Threads global column index and outer-dimension column index through the recursion.
-@inline function _pattern_nd_recursive(
-    rowval::Vector{Int},
-    colptr::Vector{Int},
-    offsets::SUnitRange{O, L},
-    row::NTuple{N_dims, AbstractUnitRange{Int}},
-    col::NTuple{N_dims, AbstractUnitRange{Int}},
+    row::NTuple{N, AbstractUnitRange{Int}},
+    col::NTuple{N, AbstractUnitRange{Int}},
     ::Val{D},
     col_idx::Int = 1,
     outer_col_idx::Int = 1,
-) where {O, L, N_dims, D}
-    if N_dims == 1
+) where {O, L, N, D}
+    if N == 1
         # Compute row_offset from outer_col_idx (column index in outer dimensions).
         # row_offset = (outer_col_idx - 1) * length(row[1])
         row_offset = (outer_col_idx - 1) * length(row[1])
@@ -474,7 +445,7 @@ end
             end
         end
     else
-        # Nd ≥ 2: peel the last dimension.
+        # N ≥ 2: peel the last dimension.
         row_last = last(row)
         col_last = last(col)
         row_rest = Base.front(row)
@@ -486,19 +457,19 @@ end
         # Columns per iteration.
         cols_per_iter = prod(length.(col_rest); init=1)
 
-        if N_dims == D
+        if N == D
             # Stencil along the outermost dimension: just iterate over c_last.
             # The three-phase logic is applied in the base case (dim 1).
             for i_last in 1:(cmax_last - cmin_last + 1)
                 c_last_mesh = cmin_last + i_last - 1
-                _pattern_nd_recursive(rowval, colptr, offsets, row_rest, col_rest, Val(D), col_idx, c_last_mesh)
+                _pattern!(rowval, colptr, offsets, row_rest, col_rest, Val(D), col_idx, c_last_mesh)
                 col_idx += cols_per_iter
             end
         else
             # Pure intersection along the outermost dimension.
             for i_last in 1:(cmax_last - cmin_last + 1)
                 c_last_mesh = cmin_last + i_last - 1
-                _pattern_nd_recursive(rowval, colptr, offsets, row_rest, col_rest, Val(D), col_idx, c_last_mesh)
+                _pattern!(rowval, colptr, offsets, row_rest, col_rest, Val(D), col_idx, c_last_mesh)
                 col_idx += cols_per_iter
             end
         end
