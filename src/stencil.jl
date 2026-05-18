@@ -443,21 +443,30 @@ end
             end
         else
             # Base case: D > N_dims means stencil dimension was peeled earlier.
-            # Still emit entries for all valid offsets.
+            # The offset applies to an OUTER dimension, so adjust row_offset by it.
+            # Walk offsets in DESCENDING order (largest δ first) to get rows in ascending order (CSC).
             rmin, rmax = first(row[1]), last(row[1])
             cmin, cmax = first(col[1]), last(col[1])
             O_val = first(offsets)
             L_val = length(offsets)
             cur = colptr[col_idx]
             for c in cmin:cmax
-                for k in 1:L_val
+                # Walk offsets δ_hi:-1:δ_lo (descending) to ensure rows ascend
+                for k in L_val:-1:1
                     δ = O_val + k - 1
-                    r = c - δ
-                    if r >= rmin && r <= rmax
-                        r_local = r - rmin + 1
-                        r_global = r_local + row_offset
-                        push!(rowval, r_global)
-                        cur += 1
+                    # Adjust the outer column index by the offset
+                    adjusted_outer_col_idx = outer_col_idx - δ
+
+                    # Check if adjusted position is in valid range
+                    if adjusted_outer_col_idx >= 1
+                        # Compute row index with adjusted outer_col_idx
+                        adjusted_row_offset = (adjusted_outer_col_idx - 1) * length(row[1])
+                        r_local = c - rmin + 1
+                        r_global = r_local + adjusted_row_offset
+                        if r_local >= 1 && r_local <= length(row[1])
+                            push!(rowval, r_global)
+                            cur += 1
+                        end
                     end
                 end
                 colptr[col_idx + 1] = cur
@@ -582,20 +591,26 @@ end
             return (nzval_idx, col_idx)
         else
             # Base case: D > N_dims means stencil dimension was peeled earlier.
-            # This dimension is an intersection, but we still emit entries for all valid offsets.
+            # The offset applies to an OUTER dimension, so use adjusted_outer_col_idx for coef indexing.
+            # Walk offsets δ_hi:-1:δ_lo (descending) to match pattern phase order.
             rmin, rmax = first(row[1]), last(row[1])
             cmin, cmax = first(col[1]), last(col[1])
             O_val = first(offsets)
             L_val = length(offsets)
 
             for c in cmin:cmax
-                # For each column c, emit entries for all valid offsets
-                for k in 1:L_val
+                # For each column c, emit entries for all valid offsets (descending order)
+                for k in L_val:-1:1
                     δ = O_val + k - 1
-                    r = c - δ
-                    if r >= rmin && r <= rmax
-                        nzval[nzval_idx] = coefs[k][c, outer_col_idx]
-                        nzval_idx += 1
+                    adjusted_outer_col_idx = outer_col_idx - δ
+
+                    # Check if adjusted position is valid
+                    if adjusted_outer_col_idx >= 1
+                        r_local = c - rmin + 1
+                        if r_local >= 1 && r_local <= length(row[1])
+                            nzval[nzval_idx] = coefs[k][c, adjusted_outer_col_idx]
+                            nzval_idx += 1
+                        end
                     end
                 end
             end
