@@ -1,6 +1,6 @@
 # Implementation Notes: N-D Stencil Assembly
 
-## Status (2026-05-18)
+## Status (2026-05-18, Updated)
 
 ### Completed
 - Full 1-D stencil assembly: `LinearStencil{1, O, L, T, 1}` on `NTuple{1, AbstractUnitRange{Int}}`
@@ -98,7 +98,44 @@ Replace the call to `_pattern!` with inline code that:
   - New: `_pattern_nd!`, `_pattern_nd_recursive`
   - New: `_fill_nd!`, `_fill_nd_recursive`
   - Existing 1-D methods unchanged (most-specific dispatch)
-- `test/test_stencil.jl`: No N-D tests yet (waiting for kernel fix)
+- `test/test_stencil.jl`: 2-D tests added and passing; 3-D tests added (partially working)
+
+## Progress Update (2026-05-18)
+
+### Completed
+- **1-D**: Full implementation with 31+ assertions passing
+- **2-D**: D=1 and D=2 fully working (2/2 tests passing)
+  - Row and column indices correct
+  - Coefficient values correct
+  - CSC sortedness guaranteed
+
+### 3-D Status
+- **D=1**: Partially working
+  - Coefficient values correct (fill phase working)
+  - Row indices incorrect (pattern phase doesn't account for multiple outer dimensions)
+  - Issue: `row_offset = (outer_col_idx - 1) * length(row[1])` only handles 2-D
+  - Needs: Row offset to account for strides from dimensions 2 and 3
+- **D=2, D=3**: Need investigation
+
+### Root Cause: Pattern Phase Recursion
+The pattern phase currently threads a single `outer_col_idx` (scalar) through the recursion, which works for 2-D but breaks for 3-D and higher. The issue manifests when computing row offsets in the base case:
+
+```julia
+adjusted_row_offset = (adjusted_outer_col_idx - 1) * length(row[1])
+```
+
+For N-D, this should be:
+```julia
+adjusted_row_offset = sum((c_i - 1) * stride_i for i in 2:N)
+```
+
+where `stride_i = prod(length(row[j]) for j in 1:i-1)`.
+
+### Next Steps
+1. Refactor pattern phase to thread `outer_coords` tuple instead of scalar `outer_col_idx`
+2. Update all base cases (D==1 and D>N_dims) to work with coordinate tuples
+3. Implement proper N-D row offset computation
+4. Validate with oracle on all 3-D cases
 
 ## References
 
