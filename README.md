@@ -2,177 +2,64 @@
 
 [![Build Status](https://github.com/vlc1/CartesianOperators.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/vlc1/CartesianOperators.jl/actions/workflows/CI.yml?query=branch%3Amain)
 
-A Julia package that assembles `SparseMatrixCSC` operators for stencil patterns
-on rectangular Cartesian meshes, where row and column index sets are
-`NTuple{N, AbstractUnitRange{Int}}`. Sparsity pattern construction and numerical
-fill are exposed as separate operations; both kernels are allocation-free, so
-the fill can be re-run cheaply inside an outer iterative solver.
+Julia package that assembles `SparseMatrixCSC` operators for stencil patterns
+on rectangular Cartesian meshes. Row and column index sets are
+`NTuple{N, AbstractUnitRange{Int}}`; stencil offsets are contiguous
+unit-stride integers encoded as a `StaticArrays.SUnitRange{O, L}`. Sparsity
+pattern and numerical fill are exposed as separate operations, both
+allocation-free, so the fill can be re-run cheaply inside an outer
+iterative solver.
 
 ```julia
 using CartesianOperators, FillArrays
+using StaticArrays: SUnitRange
 
-row = (1:4,)
-col = (1:4,)
+row = (1:4,); col = (1:4,)
 
-# A stencil = (mesh dimension, offsets, per-term coefficient arrays).
-# Forward x-difference: (D ϕ)[i] = ϕ[i+1] − ϕ[i], constant coefs via Fill.
-forward = LinearStencil{1}((1, 0), (Fill(1.0, 4), Fill(-1.0, 4)))
+# Forward x-difference (D ϕ)[i] = ϕ[i+1] − ϕ[i].
+# coefs are in ascending offset order: coefs[1] ↦ smallest offset.
+forward = LinearStencil{1}(SUnitRange(0, 1), (Fill(-1.0, 4), Fill(1.0, 4)))
 
-# One-shot:
-J = build(forward, row, col)         # fully populated SparseMatrixCSC{Float64,Int}
-
-# Or split the pattern/values phases — pattern is built once and the values
-# re-filled cheaply across many iterations of an outer solver:
-J = assemble(forward, row, col)      # colptr/rowval built; nzval undef
-update!(J, forward, row, col)        # writes J.nzval, allocation-free
+J = build(forward, row, col)         # one-shot assemble + update!
+# Or split — pattern is built once and refilled cheaply across solver iterations:
+J = assemble(forward, row, col)
+update!(J, forward, row, col)
 ```
 
-## How operations work
+## Classical 1-D differences
 
-### `LinearStencil{D,K,T,N,C}`
+| Operator   | constructor                                                                        | `(D ϕ)[i]`        |
+|------------|------------------------------------------------------------------------------------|-------------------|
+| Forward x  | `LinearStencil{1}(SUnitRange( 0, 1), (Fill(-1.0, n), Fill(1.0, n)))`               | `ϕ[i+1] − ϕ[i]`   |
+| Backward x | `LinearStencil{1}(SUnitRange(-1, 0), (Fill(-1.0, n), Fill(1.0, n)))`               | `ϕ[i]   − ϕ[i-1]` |
+| Central x  | `LinearStencil{1}(SUnitRange(-1, 1), (Fill(-1.0, n), Fill(0.0, n), Fill(1.0, n)))` | `ϕ[i+1] − ϕ[i-1]` |
 
-A `LinearStencil` carries everything an operator needs:
+Contiguity forces every offset between `Δ_min` and `Δ_max` to be represented,
+so the central difference carries a structural zero at offset 0. For variable
+coefficients pass any `AbstractArray` whose axes cover `col` (e.g.
+`(-1 ./ ρ, 1 ./ ρ)` for a density-weighted gradient).
 
-- `D::Int` — mesh dimension on which the stencil acts (1-based), `1 ≤ D ≤ N`.
-- `K::Int` — number of stencil terms.
-- `T` — shared element type of every coef array.
-- `N` — coef-array dimensionality; matches the row/col tuple length at
-  assembly time.
-- `C` — concrete tuple type of the coef containers.
-- `offsets::NTuple{K,Int}` — strictly descending 1-D offsets along dim `D`.
-- `coefs::C` — `NTuple{K,<:AbstractArray{T,N}}` of coefficient arrays.
-  Heterogeneous containers (e.g. `Fill` + `Vector` + `OffsetArray`) are
-  fine as long as they share `eltype` and `ndims`.
+## Three operations
 
-The three classical first-order x-differences are:
+| Function                   | Allocates                            | Does                                            |
+|----------------------------|--------------------------------------|-------------------------------------------------|
+| `assemble(st, row, col)`   | `colptr` + `rowval` + uninit `nzval` | builds the sparsity pattern                     |
+| `update!(J, st, row, col)` | no                                   | writes `J.nzval` in place                       |
+| `build(st, row, col)`      | same as `assemble`                   | `update!(assemble(st, row, col), st, row, col)` |
 
-| Operator   | `LinearStencil{1}` constructor                          | Stencil                            |
-|------------|---------------------------------------------------------|------------------------------------|
-| Forward x  | `LinearStencil{1}((1,  0), (Fill(1.0, n), Fill(-1.0, n)))` | `(D ϕ)[i] = ϕ[i+1] − ϕ[i]`         |
-| Backward x | `LinearStencil{1}((0, -1), (Fill(1.0, n), Fill(-1.0, n)))` | `(D ϕ)[i] = ϕ[i]   − ϕ[i-1]`       |
-| Central x  | `LinearStencil{1}((1, -1), (Fill(1.0, n), Fill(-1.0, n)))` | `(D ϕ)[i] = ϕ[i+1] − ϕ[i-1]`       |
-
-For variable coefficients, use any `AbstractArray` whose axes cover `col`:
-
-```julia
-ρ = rand(n)                                       # density on the mesh
-grad = LinearStencil{1}((0, -1), (1 ./ ρ, -1 ./ ρ))  # ψ[i] = (φ[i] − φ[i−1]) / ρ[i]
-```
-
-The constructor enforces `D ≥ 1`, `D ≤ N`, strict-descending offsets, and
-matching `eltype`/`ndims` across all coef arrays. Ill-typed inputs raise
-`ArgumentError` with diagnostic messages.
-
-### Three operations
-
-| Function                   | Allocates? | Does what                                                              |
-|----------------------------|------------|------------------------------------------------------------------------|
-| `assemble(st, row, col)`   | `colptr` + `rowval` + uninitialised `nzval` | builds the sparsity pattern  |
-| `update!(J, st, row, col)` | no         | writes `J.nzval` in place, allocation-free                             |
-| `build(st, row, col)`      | same as assemble | convenience: `update!(assemble(st, row, col), st, row, col)` in one shot |
-
-Symbolic structure is computed once per `(stencil, row, col)` triple; numeric
-fill is reused many times in an outer non-linear solve. When you don't need
-the split, `build` returns a fully populated matrix.
-
-For 1-D, `assemble` and `update!` pin both `D = 1` and `N = 1` at the type
-level. Misuse (e.g. `LinearStencil{2}` against 1-D row/col) raises
-`MethodError`; the `D ≤ N` invariant at the constructor catches the most
-common misuse earlier with a friendly `ArgumentError`.
-
-### Row/col representation: rectangular ranges on a shared mesh
-
-`row` and `col` are `NTuple{N, AbstractUnitRange{Int}}` interpreted on a
-*single shared* integer mesh — rectangular sub-blocks of the same mesh. They
-may overlap fully, partially, or not at all; they may be unequal in length
-or start at different positions (e.g. `row = (1:5,)`, `col = (3:7,)`).
-
-The matrix size is `prod(length, row) × prod(length, col)`. Per dimension,
-the compact row index for mesh position `r` is `r − first(row[d]) + 1`, and
-analogously for column. Julia's `LinearIndices` / `CartesianIndices` handle
-the linear ↔ Cartesian translation internally.
-
-### Subtraction convention
-
-For each offset `Δ`, the matrix entry from column `c` (at mesh position `p_c`)
-lands on the row at mesh position `p_c − Δ`. Equivalently, row `r` (at mesh
-`p_r`) contributes at column `p_r + Δ`. This matches the mathematical reading
-of `(D ϕ)[i] = … ϕ[i + Δ] …`, where the row index is `i` and the column index
-is `i + Δ`.
-
-### Column-anchored coefficients
-
-At each emission the kernel reads `coefs[k][c]` — the **column anchor**. Each
-`coefs[k]` is an `AbstractArray{T,N}` whose axes must cover `col` (otherwise
-indexing raises `BoundsError`). For non-square operators (e.g. staggered grids,
-restriction operators) where the coef "naturally" belongs to the row position,
-use `OffsetArrays.OffsetArray` to align indexing with mesh positions, or
-construct the coef array directly in mesh-space so `coefs[k][c]` returns the
-intended weight. For constant coefs use `FillArrays.Fill` — O(1) storage and
-O(1) `getindex`.
-
-### Kernel shape: segment walk over piecewise-constant per-column nnz
-
-The per-column nnz count `q(c) = #{k : c_lo_k ≤ c ≤ c_hi_k}`, with
-
-```
-c_lo_k = max(first(col), rmin + offsets[k])
-c_hi_k = min(last(col), rmax + offsets[k])
-```
-
-is piecewise constant in `c`. Because offsets are strictly descending,
-both endpoints are non-increasing in `k`, so the lo and hi event
-streams are already non-decreasing in column order — a two-pointer
-merge walks them without a sort. Empty c-ranges (offsets too large or
-small to reach any column) are trimmed up front in `O(K)`.
-
-Within each constant-active segment with start column `prev`, start
-pointer `cur`, slope `active = i_hi − i_lo`, and active offsets
-`k_a:i_hi` (`k_a = i_lo + 1`), every write is a **closed-form pure
-function** of the loop indices — no read-modify-write, no sequential
-dependency:
-
-```
-colptr[c − cmin + 2]                          = cur + active * (c − prev + 1)
-rowval[cur + active * (c − prev) + (k − k_a)] = c − offsets[k] − rmin + 1
-nzval [cur + active * (c − prev) + (k − k_a)] = coefs[k][c]
-```
-
-`_pattern!` does the colptr and rowval writes in one walk; `_fill!`
-does only the nzval write and does not touch `colptr`. Allocation: a
-single `resize!` of `rowval` to the analytic nnz; otherwise zero.
-
-### Offset ordering is tied to `SparseMatrixCSC`
-
-`SparseMatrixCSC` requires `rowval` to be sorted ascending within each column.
-We satisfy that **without a per-column sort** by requiring stencil offsets to
-be **strictly descending** at the type boundary: for fixed `c`, slots are
-ascending in `k` (`k − k_a` ascending), and `c − offsets[k]` is ascending
-in `k` (offsets descending) — so rows come out ascending within every
-column.
-
-The invariant is enforced by the `LinearStencil` inner constructor via
-`issorted(offsets; lt = >=)`, raising `ArgumentError` on ascending or
-duplicate offsets. The constraint is intrinsic to CSC; for CSR it would
-flip to ascending; for COO with a deferred sort it disappears.
+`assemble` and `update!` pin `D = 1`, `N = 1` at the type level (misuse →
+`MethodError`) and enforce **`L − 1 ≤ length(row[1])`** at runtime — the
+three-phase kernel's exact correctness boundary.
 
 ## Status
 
-This is a work in progress. Currently implemented:
+Implemented: `LinearStencil{D, O, L, T, N, C}` (any `1 ≤ D ≤ N`, variable
+coefficients) and 1-D `assemble` / `update!` / `build`. Next milestone: N-D
+dispatch via a recursive dimensional-peeling kernel, then composition
+(the Laplacian as a sum of `LinearStencil`s along each dimension).
 
-- `LinearStencil{D,K,T,N,C}` type (any `1 ≤ D ≤ N`, variable coefficients).
-- `assemble`, `update!`, `build` for `LinearStencil{1,K,T,1}` against
-  `NTuple{1, AbstractUnitRange{Int}}` (1-D only).
-
-Next milestone: N-D dispatch — `LinearStencil{D}` against
-`NTuple{N, AbstractUnitRange{Int}}` for any `1 ≤ D ≤ N` via a recursive
-dimensional-peeling kernel; then a higher-level abstraction for compositions
-(e.g., the Laplacian as a sum of `LinearStencil`s along each dimension).
-
-### Further reading
-
-- [`docs/plan.md`](docs/plan.md) — forward-looking implementation plan
-  (status, roadmap, next-milestone design).
-- [`AGENTS.md`](AGENTS.md) — design conventions and sticky decisions.
-- [`docs/superpowers/specs/2026-05-12-cartesian-operators-design.md`](docs/superpowers/specs/2026-05-12-cartesian-operators-design.md)
-  — original design rationale (historical).
+See [`AGENTS.md`](AGENTS.md) for design decisions (type-driven API, row/col
+contract, three-phase kernel shape, CSC ordering) and
+[`docs/plan.md`](docs/plan.md) for the implementation plan. Historical
+design rationale:
+[`docs/superpowers/specs/2026-05-12-cartesian-operators-design.md`](docs/superpowers/specs/2026-05-12-cartesian-operators-design.md).

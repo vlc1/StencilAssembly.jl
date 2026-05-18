@@ -1,6 +1,7 @@
 module CartesianOperators
 
 using SparseArrays
+using StaticArrays: SUnitRange
 
 include("stencil.jl")
 

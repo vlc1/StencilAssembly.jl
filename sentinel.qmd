@@ -1,0 +1,156 @@
+---
+title: "Edge cases in the three-phase kernel"
+subtitle: "What `_pattern!` / `_fill!` actually do at the boundaries"
+format:
+  pdf:
+    documentclass: article
+    geometry:
+      - margin=2cm
+    include-in-header:
+      text: |
+        \usepackage{tikz}
+        \usetikzlibrary{positioning,arrows.meta,calc}
+---
+
+## Setup
+
+The three-phase kernel decomposes the column axis `[cmin, cmax]` into
+three runs of constant active count:
+
+| phase       | columns               | `active`                          | rows                             |
+|-------------|-----------------------|-----------------------------------|----------------------------------|
+| Left ramp   | `[cmin, c_LR − 1]`    | `max(0, c − rmin − δ_lo + 1)`     | `1, 2, …, active(c)`             |
+| Interior    | `[c_LR, c_RR]`        | `Leff = δ_hi − δ_lo + 1` const.   | `r0 … r0 + Leff − 1`, stride 1   |
+| Right ramp  | `[c_RR + 1, cmax]`    | `max(0, δ_hi − c + rmax + 1)`     | `r0 … r0 + active − 1`, stride 1 |
+
+with `δ_lo = max(O, cmin − rmax)`, `δ_hi = min(O + L − 1, cmax − rmin)`,
+`c_LR = max(cmin, rmin + δ_hi)`, `c_RR = min(cmax, rmax + δ_lo)`,
+`r0 = c − δ_hi − rmin + 1`. Inside each phase the inner loop walks `δ`
+high → low so the emitted rows ascend per column (CSC sortedness without
+sort). The interior uses closed-form
+`cur(c) = cur_int_0 + Leff * (c − c_LR)` — column writes are independent.
+
+This document covers the three boundary scenarios that the kernel must
+handle correctly: the empty-operator early return, the off-mesh column
+tails (where `max(0, active)` clipping kicks in), and the
+`L = length(row) + 1` boundary (where the interior phase collapses).
+
+## The empty operator: `δ_lo > δ_hi`
+
+If `δ_lo > δ_hi` no offset reaches any valid row from any valid column —
+the matrix is structurally all-zero. The kernel takes an early return:
+
+```julia
+if δ_lo > δ_hi
+    resize!(rowval, 0)
+    for c in cmin:cmax
+        colptr[c - cmin + 2] = 1
+    end
+    return
+end
+```
+
+`rowval` is shrunk to length zero, and every `colptr[2..n+1]` is set to
+`1` so `colptr[j+1] − colptr[j] = 0` (zero nonzeros) for every column.
+Triggering examples:
+
+- Stencil sits entirely above the row range: `O = 10, L = 2` on
+  `row = 1:5, col = 1:5` gives `δ_lo = 10, δ_hi = 4`.
+- `col` and `row` are far apart with small offsets: `row = 1:5,
+  col = 100:100, O = -1, L = 3` gives `δ_lo = 95, δ_hi = -1`.
+
+## Off-mesh column tails: why `max(0, active)`
+
+The non-empty active set lives on column range
+`[rmin + δ_lo, rmax + δ_hi]`. When `col` extends outside this range,
+some columns at the extremes carry no entries (just `colptr` markers).
+The ramp `active` formulas
+
+    active_L(c) = c − rmin − δ_lo + 1     (left ramp)
+    active_R(c) = δ_hi − c + rmax + 1     (right ramp)
+
+go **negative** in those tails: at the left, when `c < rmin + δ_lo`;
+at the right, when `c > rmax + δ_hi`. Letting `cur += active` with a
+negative `active` would corrupt the slot counter. The fix is to clip:
+
+```julia
+active = max(0, c - rmin - δ_lo + 1)   # left ramp
+active = max(0, δ_hi - c + rmax + 1)   # right ramp
+```
+
+For zero `active` the inner loop `for i in 0:(active − 1)` is empty,
+no `rowval` writes happen, `cur` is unchanged, and only `colptr` is
+written (pointing to the running `cur`).
+
+```{=latex}
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=1.0, font=\small]
+  \draw[->, thick] (-0.3, 0) -- (10.3, 0) node[right] {$c$};
+
+  \foreach \c/\lbl in {0/{$c_{\min}$},2/2,4/{$r_{\max}{+}\delta_{hi}$},5/5,6/6,7/7,9/{$c_{\max}$}} {
+    \draw (\c, 0.08) -- (\c, -0.08);
+    \node[below=2pt, font=\scriptsize] at (\c, -0.08) {\lbl};
+  }
+
+  \draw[blue!50, line width=4pt, opacity=0.35] (0, 0) -- (4, 0);
+  \node[blue!60!black, font=\scriptsize] at (2, 0.45) {non-empty active};
+
+  \draw[red!60!black, line width=4pt, opacity=0.35] (4.05, 0) -- (9, 0);
+  \node[red!70!black, font=\scriptsize] at (6.5, 0.45) {off-mesh right tail (active $\le 0$)};
+
+  \node[font=\scriptsize, align=center] at (5, -0.95)
+    {right-ramp formula returns $\le 0$ here;\\\texttt{max(0, active)} clips, \texttt{cur} unchanged};
+\end{tikzpicture}
+\caption{Off-mesh right tail: columns past $r_{\max}+\delta_{\hi}$ produce no entries; \texttt{max(0, active)} keeps the slot counter consistent.}
+\end{figure}
+```
+
+Concrete example: `row = 1:5, col = 1:100, offsets = SUnitRange(-1, 1)`
+gives `δ_hi = 1`, so columns 7..100 lie past `rmax + δ_hi = 6` and the
+right-ramp `active = 1 − c + 5 + 1` is `0, −1, −2, …` for those columns.
+
+## The `L = length(row) + 1` boundary
+
+The runtime guard `L − 1 ≤ length(row[1])` (= `m`) is the *exact*
+correctness boundary of the three-phase kernel. The interesting case is
+the equality `L = m + 1`.
+
+At that boundary, with no trimming, `Leff = m + 1` and
+
+    c_LR − c_RR = (rmin + δ_hi) − (rmax + δ_lo) = Leff − m = 1,
+
+so `c_LR = c_RR + 1`. The interior range `c_LR:c_RR` is empty (Julia
+handles this with a zero-iteration `for` loop), and the left ramp
+covers `[cmin, c_RR]` while the right ramp covers
+`[c_RR + 1, cmax] = [c_LR, cmax]`. The two ramps **tile** the column
+range without gap.
+
+At the last left-ramp column `c = c_RR`, `active = m` (the row capacity);
+at the first right-ramp column `c = c_LR`, `active = m` again. The
+interior — which would have wanted all `m + 1` offsets simultaneously
+active — is unreachable by construction: no column has that much row
+range available.
+
+Beyond the boundary (`L = m + 2`), `c_LR > c_RR + 1`, and the columns
+in `(c_RR, c_LR)` would need a fourth **saturated middle** phase with
+both bounds dynamic and `active = m`. That phase is deliberately out
+of scope; the runtime guard prevents callers from entering this regime.
+
+## Why `cur` stays consistent across all three cases
+
+The kernel maintains the invariant `cur == total nonzeros written so far`
+at every column boundary. Each of the boundary scenarios above preserves
+the invariant:
+
+- **Empty operator**: `cur = 1` throughout; `colptr` filled with `1`s.
+- **Off-mesh tail** (clipped `active = 0`): inner loop empty;
+  `cur += 0`; `colptr[c − cmin + 2] = cur`.
+- **`L = m + 1` boundary** (empty interior): interior loop has zero
+  iterations; `cur = cur_int_0 + Leff * max(0, c_RR − c_LR + 1) =
+  cur_int_0 + 0`. The `max(0, …)` is needed because `c_RR − c_LR + 1`
+  is `0` (range is `c_LR:c_RR = c_LR:(c_LR − 1)`, empty).
+
+Together, these three mechanisms — early return, `max(0, active)`
+clipping, and `max(0, c_RR − c_LR + 1)` after the interior — make the
+kernel total over the full allowed input space `L ≤ length(row) + 1`.
