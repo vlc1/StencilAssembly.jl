@@ -354,3 +354,197 @@ end
         @test J == ref
     end
 end
+
+@testset "StarStencil constructor" begin
+    # L invalid
+    @test_throws ArgumentError StarStencil{0}(((Fill(1.0, 5), Fill(1.0, 5), Fill(1.0, 5)),))
+    @test_throws ArgumentError StarStencil{-1}(((Fill(1.0, 5), Fill(1.0, 5), Fill(1.0, 5)),))
+    @test_throws ArgumentError StarStencil{1.0}(((Fill(1.0, 5), Fill(1.0, 5), Fill(1.0, 5)),))
+    # M ≠ 2L+1
+    @test_throws ArgumentError StarStencil{1}(((Fill(1.0, 5), Fill(1.0, 5)),))                    # M=2
+    @test_throws ArgumentError StarStencil{1}(((Fill(1.0, 5), Fill(1.0, 5), Fill(1.0, 5), Fill(1.0, 5)),))  # M=4
+    # Non-tuple coefs
+    @test_throws ArgumentError StarStencil{1}([Fill(1.0, 5), Fill(1.0, 5), Fill(1.0, 5)])
+    # Outer-constructor friendly errors
+    @test_throws ArgumentError StarStencil{1}(((1.0, 2.0, 3.0),))                                  # scalars not arrays
+    @test_throws ArgumentError StarStencil{1}(((Fill(1.0, 5), Fill(1f0, 5), Fill(1.0, 5)),))       # mixed eltype
+    @test_throws ArgumentError StarStencil{1}(((Fill(1.0, 5), Fill(1.0, (5, 1)), Fill(1.0, 5)),))  # mixed ndims
+    @test_throws ArgumentError StarStencil{1}(((Fill(1.0, 5), Fill(1.0, 5), Fill(1.0, 5)),         # N=1 but ndims=2
+                                              (Fill(1.0, 5), Fill(1.0, 5), Fill(1.0, 5))))
+    # Happy path: store stays as given
+    st = StarStencil{1}(((Fill(-1.0, 5), Fill(2.0, 5), Fill(-1.0, 5)),))
+    @test st.coefs[1][1] == Fill(-1.0, 5)
+    @test st.coefs[1][2] == Fill(2.0, 5)
+    @test st.coefs[1][3] == Fill(-1.0, 5)
+end
+
+@testset "StarStencil 1-D (delegates to LinearStencil)" begin
+    @testset "Laplacian shape, row=col=(1:6,)" begin
+        row = (1:6,); col = (1:6,)
+        n = 6
+        coefs = ((Fill(-1.0, n), Fill(2.0, n), Fill(-1.0, n)),)
+        st = StarStencil{1}(coefs)
+        ln = LinearStencil{1}(SUnitRange(-1, 1), coefs[1])
+        @test build(st, row, col) == build(ln, row, col)
+    end
+
+    @testset "asymmetric values, row=col=(1:5,)" begin
+        # Asymmetric coefs to confirm the kernel doesn't assume value-symmetry.
+        n = 5
+        coefs = ((Fill(0.3, n), Fill(1.7, n), Fill(-2.1, n)),)
+        st = StarStencil{1}(coefs)
+        ln = LinearStencil{1}(SUnitRange(-1, 1), coefs[1])
+        @test build(st, (1:n,), (1:n,)) == build(ln, (1:n,), (1:n,))
+    end
+
+    @testset "L=2, asymmetric values, row=col=(1:6,)" begin
+        n = 6
+        coefs = ((Fill(0.1, n), Fill(0.2, n), Fill(0.3, n), Fill(0.4, n), Fill(0.5, n)),)
+        st = StarStencil{2}(coefs)
+        ln = LinearStencil{1}(SUnitRange(-2, 2), coefs[1])
+        @test build(st, (1:n,), (1:n,)) == build(ln, (1:n,), (1:n,))
+    end
+end
+
+# Decomposition oracle: a StarStencil equals the sum of N LinearStencils,
+# one per axis, with the same offsets and per-axis coefs.
+function _star_decomposition_oracle(st::StarStencil{L, T, N, M}, row, col) where {L, T, N, M}
+    Σ = build(LinearStencil{1}(SUnitRange(-L, L), st.coefs[1]), row, col)
+    for d in 2:N
+        Σ = Σ + build(LinearStencil{d}(SUnitRange(-L, L), st.coefs[d]), row, col)
+    end
+    return Σ
+end
+
+@testset "StarStencil 2-D vs sum(LinearStencils)" begin
+    @testset "Laplacian, row=col=(1:5,1:4)" begin
+        row = (1:5, 1:4); col = (1:5, 1:4)
+        n1 = length(row[1]); n2 = length(row[2])
+        coefs = (
+            (Fill(-1.0, n1, n2), Fill(2.0, n1, n2), Fill(-1.0, n1, n2)),
+            (Fill(-1.0, n1, n2), Fill(2.0, n1, n2), Fill(-1.0, n1, n2)),
+        )
+        st = StarStencil{1}(coefs)
+        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+    end
+
+    @testset "asymmetric values, row=col=(1:6,1:5)" begin
+        row = (1:6, 1:5); col = (1:6, 1:5)
+        n1, n2 = 6, 5
+        coefs = (
+            (Fill(0.1, n1, n2), Fill(1.7, n1, n2), Fill(-2.3, n1, n2)),
+            (Fill(-0.5, n1, n2), Fill(3.1, n1, n2), Fill(0.8, n1, n2)),
+        )
+        st = StarStencil{1}(coefs)
+        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+    end
+
+    @testset "L=2, row=col=(1:4,1:4)" begin
+        row = (1:4, 1:4); col = (1:4, 1:4)
+        n1, n2 = 4, 4
+        ax_coefs() = ntuple(k -> Fill(0.1 * k, n1, n2), 5)
+        coefs = (ax_coefs(), ax_coefs())
+        st = StarStencil{2}(coefs)
+        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+    end
+
+    @testset "Float32, row=col=(1:4,1:4)" begin
+        row = (1:4, 1:4); col = (1:4, 1:4)
+        coefs = (
+            (Fill(-1f0, 4, 4), Fill(2f0, 4, 4), Fill(-1f0, 4, 4)),
+            (Fill(-1f0, 4, 4), Fill(2f0, 4, 4), Fill(-1f0, 4, 4)),
+        )
+        st = StarStencil{1}(coefs)
+        J = build(st, row, col)
+        @test eltype(J) == Float32
+        @test J == _star_decomposition_oracle(st, row, col)
+    end
+
+    @testset "col ⊋ row in axis 1 (exercises axis-1-only branch), row=(1:5,1:4), col=(0:6,1:4)" begin
+        row = (1:5, 1:4); col = (0:6, 1:4)
+        # Coefs must cover col[1] = 0:6 — wrap with OffsetArrays-style hand-rolled axes.
+        # Easiest: use Fill with enough cells indexed by absolute mesh position via 0:6 axis.
+        # Fill is shape-based so its axes are 1-based; indexing at c=0 would fail.
+        # Use a Dict-backed coef? Simpler: shift to (1:7, 1:4) for row to keep col[1] indices valid.
+        # Re-pick ranges so col[1] still extends beyond row[1] but stays positive.
+        row = (2:6, 1:4); col = (1:7, 1:4)
+        n_col1, n_col2 = 7, 4
+        coefs = (
+            (Fill(-1.0, n_col1, n_col2), Fill(2.0, n_col1, n_col2), Fill(-1.0, n_col1, n_col2)),
+            (Fill(-1.0, n_col1, n_col2), Fill(2.0, n_col1, n_col2), Fill(-1.0, n_col1, n_col2)),
+        )
+        st = StarStencil{1}(coefs)
+        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+    end
+
+    @testset "col ⊋ row in axis 2 (exercises axis-2-only branch), row=(1:5,2:4), col=(1:5,1:5)" begin
+        row = (1:5, 2:4); col = (1:5, 1:5)
+        coefs = (
+            (Fill(-1.0, 5, 5), Fill(2.0, 5, 5), Fill(-1.0, 5, 5)),
+            (Fill(-1.0, 5, 5), Fill(2.0, 5, 5), Fill(-1.0, 5, 5)),
+        )
+        st = StarStencil{1}(coefs)
+        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+    end
+end
+
+@testset "StarStencil 3-D vs sum(LinearStencils)" begin
+    @testset "Laplacian, row=col=(1:3,1:3,1:3)" begin
+        row = (1:3, 1:3, 1:3); col = (1:3, 1:3, 1:3)
+        coefs = ntuple(_ -> (Fill(-1.0, 3, 3, 3), Fill(2.0, 3, 3, 3), Fill(-1.0, 3, 3, 3)), 3)
+        st = StarStencil{1}(coefs)
+        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+    end
+
+    @testset "asymmetric values, row=col=(1:3,1:3,1:3)" begin
+        row = (1:3, 1:3, 1:3); col = (1:3, 1:3, 1:3)
+        coefs = (
+            (Fill(0.1, 3, 3, 3), Fill(1.0, 3, 3, 3), Fill(-2.0, 3, 3, 3)),
+            (Fill(-0.5, 3, 3, 3), Fill(2.5, 3, 3, 3), Fill(0.8, 3, 3, 3)),
+            (Fill(0.3, 3, 3, 3), Fill(-1.4, 3, 3, 3), Fill(0.6, 3, 3, 3)),
+        )
+        st = StarStencil{1}(coefs)
+        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+    end
+
+    @testset "unequal lengths, row=col=(1:4,1:3,1:2)" begin
+        row = (1:4, 1:3, 1:2); col = (1:4, 1:3, 1:2)
+        coefs = ntuple(_ -> (Fill(-1.0, 4, 3, 2), Fill(2.0, 4, 3, 2), Fill(-1.0, 4, 3, 2)), 3)
+        st = StarStencil{1}(coefs)
+        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+    end
+
+    @testset "col ⊋ row in axis 3, row=(1:3,1:3,2:4), col=(1:3,1:3,1:5)" begin
+        row = (1:3, 1:3, 2:4); col = (1:3, 1:3, 1:5)
+        coefs = ntuple(_ -> (Fill(-1.0, 3, 3, 5), Fill(2.0, 3, 3, 5), Fill(-1.0, 3, 3, 5)), 3)
+        st = StarStencil{1}(coefs)
+        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+    end
+end
+
+@testset "StarStencil 2L > length(row[d]) guard" begin
+    # L=2, length(row[1]) = 3 → 2L=4 > 3, rejected.
+    coefs = ((Fill(0.0, 3), Fill(0.0, 3), Fill(0.0, 3), Fill(0.0, 3), Fill(0.0, 3)),)
+    st = StarStencil{2}(coefs)
+    @test_throws ArgumentError build(st, (1:3,), (1:3,))
+
+    # 2-D: violated in axis 2 only.
+    coefs2 = (
+        (Fill(0.0, 5, 3), Fill(0.0, 5, 3), Fill(0.0, 5, 3), Fill(0.0, 5, 3), Fill(0.0, 5, 3)),
+        (Fill(0.0, 5, 3), Fill(0.0, 5, 3), Fill(0.0, 5, 3), Fill(0.0, 5, 3), Fill(0.0, 5, 3)),
+    )
+    st2 = StarStencil{2}(coefs2)
+    @test_throws ArgumentError build(st2, (1:5, 1:3), (1:5, 1:3))  # axis 2: 2L=4 > 3
+end
+
+@testset "StarStencil build = update!(assemble(...), ...)" begin
+    row = (1:4, 1:4); col = (1:4, 1:4)
+    coefs = (
+        (Fill(-1.0, 4, 4), Fill(2.0, 4, 4), Fill(-1.0, 4, 4)),
+        (Fill(-1.0, 4, 4), Fill(2.0, 4, 4), Fill(-1.0, 4, 4)),
+    )
+    st = StarStencil{1}(coefs)
+    J_two_step = update!(assemble(st, row, col), st, row, col)
+    J_build    = build(st, row, col)
+    @test J_two_step == J_build
+end
