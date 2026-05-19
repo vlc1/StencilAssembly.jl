@@ -50,14 +50,23 @@ quickstart, [`docs/plan.md`](docs/plan.md) for status and roadmap.
    per-phase formulas.
 
 Public API: `LinearStencil`, `assemble`, `update!`, `build`. 1-D kernel
-names: `_pattern!`, `_fill!`. N-D (deferred): tuple-length dispatch via
-`Base.front` / `last`; accumulators as `Tuple`s, no `Ref`s. Tests:
-`julia --project=. -e 'using Pkg; Pkg.test()'`.
+names: `_pattern!`, `_fill!` (specialised fast path). N-D kernels:
+`_pattern_nd!`, `_fill_nd!` — state-threading recursion that peels
+dimensions outermost (last) → innermost (first) via `Base.front` /
+`last`, dispatches on `Val{D}` × `Val{Nd}`, and **returns** updated
+state (`(cur, col_j)` for pattern, `nzval_idx` for fill) so each output
+column is visited exactly once. The three-phase trim runs at the
+stencil-dim peel (`Nd == D`), yielding `(active_c, r_start_c)` that
+are threaded to the inner base case which emits an arithmetic
+sequence of step `s_D = prod(length(row[d]) for d in 1:D-1)`. Outer
+non-D peels accumulate `row_base`; fill threads outer mesh coords as
+an `NTuple` for dimension-agnostic `coefs[k][c_1, outer_coords...]`
+indexing. Tests: `julia --project=. -e 'using Pkg; Pkg.test()'`.
 
 ## Scope
 
 Implemented: `LinearStencil{D, O, L, T, N, C}` (any `1 ≤ D ≤ N`); 1-D
 `assemble` / `update!` / `build` with the `L − 1 ≤ length(row[1])`
-guard. Next milestone ([`docs/plan.md`](docs/plan.md)): N-D dispatch
-via recursive dimensional-peeling kernels (tuple-length dispatch).
-Deferred: composition, `BandedMatrix` target, dense.
+guard; N-D `assemble` / `update!` / `build` (2-D and 3-D tested for
+all `D`) with the `L − 1 ≤ length(row[D])` guard. Deferred:
+composition, `BandedMatrix` target, dense.

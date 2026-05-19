@@ -5,7 +5,7 @@ using SparseArrays
 using StaticArrays: SUnitRange
 using Test
 
-include("reference.jl")
+# reference.jl is included by runtests.jl before this file runs.
 
 @testset "LinearStencil constructor" begin
     # inner-constructor validation (well-typed inputs, invalid D)
@@ -285,6 +285,71 @@ end
         J = build(st, row, col)
         # Offsets for D=2: (CartesianIndex(0,0), CartesianIndex(0,1))
         offsets = (CartesianIndex(0, 0), CartesianIndex(0, 1))
+        ref = stencil_reference(offsets, (-1.0, 1.0), row, col)
+        @test J == ref
+    end
+
+    @testset "2-D D=1, row=(2:4,1:4) col=(1:3,1:4) (shifted stencil dim)" begin
+        row = (2:4, 1:4); col = (1:3, 1:4)
+        st = LinearStencil{1}(SUnitRange(0, 1), (Fill(-1.0, 3, 4), Fill(1.0, 3, 4)))
+        J = build(st, row, col)
+        offsets = (CartesianIndex(0, 0), CartesianIndex(1, 0))
+        ref = stencil_reference(offsets, (-1.0, 1.0), row, col)
+        @test J == ref
+    end
+
+    @testset "2-D D=2, row=(1:3,2:5) col=(1:3,1:4) (shifted stencil dim)" begin
+        row = (1:3, 2:5); col = (1:3, 1:4)
+        st = LinearStencil{2}(SUnitRange(0, 1), (Fill(-1.0, 3, 4), Fill(1.0, 3, 4)))
+        J = build(st, row, col)
+        offsets = (CartesianIndex(0, 0), CartesianIndex(0, 1))
+        ref = stencil_reference(offsets, (-1.0, 1.0), row, col)
+        @test J == ref
+    end
+
+    @testset "2-D D=1, row=(1:3,2:4) col=(1:3,1:4) (shifted non-stencil dim)" begin
+        row = (1:3, 2:4); col = (1:3, 1:4)
+        st = LinearStencil{1}(SUnitRange(0, 1), (Fill(-1.0, 3, 4), Fill(1.0, 3, 4)))
+        J = build(st, row, col)
+        offsets = (CartesianIndex(0, 0), CartesianIndex(1, 0))
+        ref = stencil_reference(offsets, (-1.0, 1.0), row, col)
+        @test J == ref
+    end
+end
+
+@testset "assemble + update! 3-D" begin
+    @testset "3-D D=1, row=col=(1:2,1:2,1:3)" begin
+        row = (1:2, 1:2, 1:3); col = (1:2, 1:2, 1:3)
+        st = LinearStencil{1}(SUnitRange(0, 1), (Fill(-1.0, 2, 2, 3), Fill(1.0, 2, 2, 3)))
+        J = build(st, row, col)
+        offsets = (CartesianIndex(0, 0, 0), CartesianIndex(1, 0, 0))
+        ref = stencil_reference(offsets, (-1.0, 1.0), row, col)
+        @test J == ref
+    end
+
+    @testset "3-D D=2, row=col=(1:2,1:2,1:3)" begin
+        row = (1:2, 1:2, 1:3); col = (1:2, 1:2, 1:3)
+        st = LinearStencil{2}(SUnitRange(0, 1), (Fill(-1.0, 2, 2, 3), Fill(1.0, 2, 2, 3)))
+        J = build(st, row, col)
+        offsets = (CartesianIndex(0, 0, 0), CartesianIndex(0, 1, 0))
+        ref = stencil_reference(offsets, (-1.0, 1.0), row, col)
+        @test J == ref
+    end
+
+    @testset "3-D D=3, row=col=(1:2,1:2,1:3)" begin
+        row = (1:2, 1:2, 1:3); col = (1:2, 1:2, 1:3)
+        st = LinearStencil{3}(SUnitRange(0, 1), (Fill(-1.0, 2, 2, 3), Fill(1.0, 2, 2, 3)))
+        J = build(st, row, col)
+        offsets = (CartesianIndex(0, 0, 0), CartesianIndex(0, 0, 1))
+        ref = stencil_reference(offsets, (-1.0, 1.0), row, col)
+        @test J == ref
+    end
+
+    @testset "3-D D=2, shifted stencil dim, row=(1:2,2:4,1:3) col=(1:2,1:3,1:3)" begin
+        row = (1:2, 2:4, 1:3); col = (1:2, 1:3, 1:3)
+        st = LinearStencil{2}(SUnitRange(0, 1), (Fill(-1.0, 2, 3, 3), Fill(1.0, 2, 3, 3)))
+        J = build(st, row, col)
+        offsets = (CartesianIndex(0, 0, 0), CartesianIndex(0, 1, 0))
         ref = stencil_reference(offsets, (-1.0, 1.0), row, col)
         @test J == ref
     end
