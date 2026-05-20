@@ -1,156 +1,48 @@
-"""
-    StarStencil{L, T, N, M, C<:NTuple{N, AbstractArray{SVector{M, T}, N}}, S<:AccessStyle}
-        <: AbstractStencil{S}
-
-N-D variable-coefficient star-shaped stencil with symmetric reach `−L … +L`
-along every mesh dimension. Per-axis offsets are **diagonal indices** in
-the numerical-linear-algebra sense: along axis `d`, for column `c_d` and
-row `r_d`, the diagonal number is `δ_d = c_d − r_d`. Each offset
-`δ ∈ −L:L` along axis `d` produces an entry at row coord `c_d − δ`
-in that dimension, identity in all others.
-
-The action on a discrete field `φ` at mesh position `(i_1, …, i_N)` is
-
-    ψ[i_1, …, i_N] = Σ_d Σ_{δ = −L}^{L} terms[d][i_1, …][δ + L + 1] · φ[…, i_d − δ, …]
-
-The diagonal sums the per-axis δ=0 contributions:
-`A[r, r] = Σ_d terms[d][c][L + 1]` (single CSC entry, merged).
-
-Type parameters:
-- `L ≥ 1` is the per-axis reach; `M = 2L + 1` is the number of offsets
-  per axis.
-- `T`, `N`: scalar coef `eltype` and array `ndims`.
-- `C`: concrete coef container — one `AbstractArray{SVector{M, T}, N}`
-  per axis.
-- `S<:AccessStyle`: anchoring of the coefficient arrays
-  (`ColumnAccess` for CSC, `RowAccess` reserved for CSR).
-
-`terms[d][c_idx...][k]` is the coefficient at column mesh position
-`c_idx` for axis `d`, offset `δ = k − L − 1` (under `S = ColumnAccess`):
-each `terms[d][c_idx...]` is the per-axis `SVector{M}` of offset
-coefficients on that column. Coef arrays' axes must cover the
-column-side mesh range supplied to `assemble` / `update!`.
-
-# Construction
-
-```julia
-# Default (ColumnAccess):
-StarStencil{1}(coefs_tuple)
-
-# Explicit access style (positional Type tag):
-StarStencil{1}(RowAccess, coefs_tuple)
-```
-
-# Example
-
-```julia
-using FillArrays, StaticArrays: SVector
-n1, n2 = 5, 4
-# 2-D negative Laplacian on a 5×4 mesh; one SVector per axis per column.
-coefs = (
-    Fill(SVector(-1.0, 2.0, -1.0), n1, n2),
-    Fill(SVector(-1.0, 2.0, -1.0), n1, n2),
-)
-st = StarStencil{1}(coefs)
-J = build(st, (1:n1, 1:n2), (1:n1, 1:n2))
-```
-
-See [`assemble`](@ref), [`update!`](@ref), [`build`](@ref),
-[`AccessStyle`](@ref).
-"""
-struct StarStencil{L, T, N, M,
-                   C<:NTuple{N, AbstractArray{SVector{M, T}, N}},
-                   S<:AccessStyle} <: AbstractStencil{S}
-    terms::C
-
-    function StarStencil{L}(
-        ::Type{S},
-        terms::NTuple{N, AbstractArray{SVector{M, T}, N}},
-    ) where {L, S<:AccessStyle, T, N, M}
-        L isa Int && L >= 1 || throw(ArgumentError(
-            "stencil reach L must be a positive Int (got $L)"))
-        M == 2L + 1 || throw(ArgumentError(
-            "per-axis SVector length must be 2L+1=$(2L + 1) (got $M)"))
-        new{L, T, N, M, typeof(terms), S}(terms)
-    end
-end
-
-# Default outer constructor: bare 1-arg form forwards with ColumnAccess.
-StarStencil{L}(terms) where {L} = StarStencil{L}(ColumnAccess, terms)
-
-# Friendly outer constructor: reports specific errors when the inner method's
-# NTuple{N, AbstractArray{SVector{M, T}, N}} signature does not match.
-function StarStencil{L}(::Type{S}, terms::Tuple) where {L, S<:AccessStyle}
-    L isa Int && L >= 1 || throw(ArgumentError(
-        "stencil reach L must be a positive Int (got $L)"))
-    M_expected = 2L + 1
-    all(c -> c isa AbstractArray, terms) || throw(ArgumentError(
-        "each per-axis term must be an AbstractArray of SVector{$M_expected} " *
-        "(got $(map(typeof, terms)))"))
-    Es = map(eltype, terms)
-    all(E -> E <: SVector, Es) || throw(ArgumentError(
-        "each per-axis term eltype must be SVector{$M_expected, T} " *
-        "(got eltypes $Es)"))
-    all(E -> length(E) == M_expected, Es) || throw(ArgumentError(
-        "each per-axis term eltype must be SVector{$M_expected, T} to match " *
-        "2L+1=$M_expected (got SVector lengths $(map(length, Es)))"))
-    Ts = map(eltype, Es)
-    all(==(first(Ts)), Ts) || throw(ArgumentError(
-        "all terms must share the same scalar eltype (got $Ts)"))
-    Ns = map(ndims, terms)
-    all(==(first(Ns)), Ns) || throw(ArgumentError(
-        "all terms must share the same ndims (got $Ns)"))
-    first(Ns) == length(terms) || throw(ArgumentError(
-        "term arrays must have ndims == N = $(length(terms)) " *
-        "(got $(first(Ns)))"))
-    throw(ArgumentError("StarStencil could not be constructed; terms = $terms"))
-end
-
-# Catch-all for non-Tuple terms.
-function StarStencil{L}(::Type{S}, terms) where {L, S<:AccessStyle}
-    throw(ArgumentError(
-        "terms must be an NTuple{N, AbstractArray{SVector{M, T}, N}} " *
-        "(got $(typeof(terms)))"))
-end
+# `StarStencil` is defined in StencilCore (its coefficient containers may be
+# concrete arrays or symbolic terms). This file adds the CSC assembly methods,
+# which dispatch on concrete-array coefficients and `S = ColumnAccess`; the
+# 1-D case delegates to `LinearStencil` via `_as_linear`.
 
 """
-    _as_linear(st::StarStencil{L, T, 1, M, C, S}) -> LinearStencil{1, …, S}
+    _as_linear(st::StarStencil{L, 1, M, E, C, S}) -> LinearStencil{1, …, S}
 
 Convert a 1-D `StarStencil` to the equivalent `LinearStencil{1}` with
 offsets `−L … +L` and the same per-cell coefficient arrays. Preserves
 the access style. The 1-D `assemble` / `update!` methods for
 `StarStencil` delegate through this.
 """
-_as_linear(st::StarStencil{L, T, 1, M, C, S}) where {L, T, M, C, S} =
+_as_linear(st::StarStencil{L, 1, M, E, C, S}) where {L, M, E, C, S} =
     LinearStencil{1}(S, SUnitRange(-L, L), st.terms[1])
 
 """
-    assemble(st::StarStencil{L, T, 1, M, C, ColumnAccess}, row, col) -> SparseMatrixCSC{T, Int}
+    assemble(st::StarStencil{L, 1, M, SVector{M, T}, C, ColumnAccess}, row, col) -> SparseMatrixCSC{T, Int}
 
 1-D `StarStencil` (with `ColumnAccess`) assembly delegates to the
 equivalent `LinearStencil{1, …, ColumnAccess}` — no parallel codepath.
 """
 assemble(
-    st::StarStencil{L, T, 1, M, C, ColumnAccess},
+    st::StarStencil{L, 1, M, SVector{M, T}, C, ColumnAccess},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
-) where {L, T, M, C} = assemble(_as_linear(st), row, col)
+) where {L, M, T, C<:NTuple{1, AbstractArray{SVector{M, T}, 1}}} =
+    assemble(_as_linear(st), row, col)
 
 """
-    update!(mat, st::StarStencil{L, T, 1, M, C, ColumnAccess}, row, col) -> mat
+    update!(mat, st::StarStencil{L, 1, M, SVector{M, T}, C, ColumnAccess}, row, col) -> mat
 
 1-D `StarStencil` (with `ColumnAccess`) update delegates to the
 equivalent `LinearStencil{1, …, ColumnAccess}`.
 """
 update!(
     mat::SparseMatrixCSC{T, Int},
-    st::StarStencil{L, T, 1, M, C, ColumnAccess},
+    st::StarStencil{L, 1, M, SVector{M, T}, C, ColumnAccess},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
-) where {L, T, M, C} = update!(mat, _as_linear(st), row, col)
+) where {L, T, M, C<:NTuple{1, AbstractArray{SVector{M, T}, 1}}} =
+    update!(mat, _as_linear(st), row, col)
 
 """
-    assemble(st::StarStencil{L, T, N, M, C, ColumnAccess}, row, col) -> SparseMatrixCSC{T, Int}
+    assemble(st::StarStencil{L, N, M, SVector{M, T}, C, ColumnAccess}, row, col) -> SparseMatrixCSC{T, Int}
 
 N-D entry (`N ≥ 2`, `S = ColumnAccess`). Enforces the per-axis guard
 `2L ≤ length(row[d])` for every `d ∈ 1:N` — this is the LinearStencil
@@ -163,10 +55,10 @@ Builds `colptr` / `rowval` and allocates uninitialised `nzval`; call
 [`update!`](@ref) to populate values, or use [`build`](@ref) to do both.
 """
 function assemble(
-    st::StarStencil{L, T, N, M, C, ColumnAccess},
+    st::StarStencil{L, N, M, SVector{M, T}, C, ColumnAccess},
     row::NTuple{N, AbstractUnitRange{Int}},
     col::NTuple{N, AbstractUnitRange{Int}},
-) where {L, T, N, M, C}
+) where {L, N, M, T, C<:NTuple{N, AbstractArray{SVector{M, T}, N}}}
     for d in 1:N
         2L <= length(row[d]) || throw(ArgumentError(
             "stencil reach 2L=$(2L) exceeds length(row[$d])=$(length(row[d])); " *
@@ -183,7 +75,7 @@ function assemble(
 end
 
 """
-    update!(mat, st::StarStencil{L, T, N, M, C, ColumnAccess}, row, col) -> mat
+    update!(mat, st::StarStencil{L, N, M, SVector{M, T}, C, ColumnAccess}, row, col) -> mat
 
 N-D in-place value update (`N ≥ 2`, `S = ColumnAccess`); carries the
 same per-axis guard as [`assemble`](@ref). `mat` must have been
@@ -192,10 +84,10 @@ the kernel's sweep.
 """
 function update!(
     mat::SparseMatrixCSC{T, Int},
-    st::StarStencil{L, T, N, M, C, ColumnAccess},
+    st::StarStencil{L, N, M, SVector{M, T}, C, ColumnAccess},
     row::NTuple{N, AbstractUnitRange{Int}},
     col::NTuple{N, AbstractUnitRange{Int}},
-) where {L, T, N, M, C}
+) where {L, T, N, M, C<:NTuple{N, AbstractArray{SVector{M, T}, N}}}
     for d in 1:N
         2L <= length(row[d]) || throw(ArgumentError(
             "stencil reach 2L=$(2L) exceeds length(row[$d])=$(length(row[d])); " *

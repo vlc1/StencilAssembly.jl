@@ -401,7 +401,7 @@ end
 
 # Decomposition oracle: a StarStencil equals the sum of N LinearStencils,
 # one per axis, with the same offsets and per-axis terms.
-function _star_decomposition_oracle(st::StarStencil{L, T, N, M}, row, col) where {L, T, N, M}
+function _star_decomposition_oracle(st::StarStencil{L, N, M}, row, col) where {L, N, M}
     Σ = build(LinearStencil{1}(SUnitRange(-L, L), st.terms[1]), row, col)
     for d in 2:N
         Σ = Σ + build(LinearStencil{d}(SUnitRange(-L, L), st.terms[d]), row, col)

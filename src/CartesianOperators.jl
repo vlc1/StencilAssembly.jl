@@ -2,19 +2,22 @@ module CartesianOperators
 
 using SparseArrays
 using StaticArrays: SUnitRange, SVector
+using StencilCore
 
-include("term.jl")      # AccessStyle trait + AbstractStencil supertype
 include("stencil.jl")   # interface: declarations + generic build
-include("linear.jl")    # LinearStencil
-include("star.jl")      # StarStencil (depends on LinearStencil via _as_linear)
+include("linear.jl")    # LinearStencil assembly (type lives in StencilCore)
+include("star.jl")      # StarStencil assembly (delegates 1-D via _as_linear)
 
+# Re-export the stencil vocabulary owned by StencilCore.
 export AccessStyle,
        ColumnAccess,
        RowAccess,
        AbstractStencil,
        LinearStencil,
-       StarStencil,
-       assemble,
+       StarStencil
+
+# CartesianOperators' own assembly verbs.
+export assemble,
        update!,
        build
 

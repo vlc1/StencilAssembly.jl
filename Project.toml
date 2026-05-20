@@ -6,11 +6,18 @@ authors = ["Vincent Le Chenadec <vincentlechenadec@gmail.com>"]
 [deps]
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+StencilCore = "a74cdc4b-3eb6-46ad-ac2b-692b37b57e71"
+
+# StencilCore is not (yet) registered; resolve it from the sibling checkout.
+# Remove this section once StencilCore is registered in a reachable registry.
+[sources]
+StencilCore = {path = "../StencilCore"}
 
 [compat]
 SparseArrays = "1.10"
 StaticArrays = "1"
-julia = "1.10"
+StencilCore = "0.1"
+julia = "1.11"
 
 [extras]
 FillArrays = "1a297f60-69ca-5386-bcde-b61e274b549b"

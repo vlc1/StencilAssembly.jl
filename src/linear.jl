@@ -1,100 +1,6 @@
-"""
-    LinearStencil{D, O, L, T, N, A<:AbstractArray{SVector{L, T}, N}, S<:AccessStyle}
-        <: AbstractStencil{S}
-
-Variable-coefficient stencil with **contiguous** offsets, aligned with mesh
-dimension `D`. Offsets are **diagonal indices** in the
-numerical-linear-algebra sense: for a column `j` and a row `i` the diagonal
-number is `k = j − i`. For column `c` at mesh position `p_c` and offset
-`δ`, the matrix entry lands on row `p_c − δ` with coefficient
-`term[p_c][δ − O + 1]` — the coefficient array is **column-anchored** under
-`S = ColumnAccess`, and each element `term[p_c]` is the `SVector{L}` of all
-`L` per-offset coefficients on that column in **ascending offset order**
-(`term[p_c][1]` ↦ offset `O`).
-
-Type parameters:
-- `D`: mesh dim along which the stencil acts (1-based, `1 ≤ D ≤ N`).
-- `O = δ_min`, `L = δ_max − δ_min + 1` — static via `SUnitRange`.
-- `T`, `N`: scalar coef `eltype` and array `ndims`.
-- `A`: concrete coef-array type; `eltype(A) == SVector{L, T}`.
-- `S<:AccessStyle`: anchoring of the coefficient array
-  (`ColumnAccess` for CSC, `RowAccess` reserved for CSR).
-
-Inner constructor `LinearStencil{D}(::Type{S}, offsets::SUnitRange{O, L}, term)`
-checks `D ≥ 1` and `D ≤ N`; the `SVector{L}` element length is tied to the
-offset count `L` at the type level (a mismatch fails dispatch). The default
-outer constructor (no `::Type{S}` argument) defaults `S` to `ColumnAccess`. A
-catch-all outer constructor reports `ArgumentError`s for non-`SUnitRange`
-offsets, non-array `term`, non-`SVector` eltype, and `SVector` length ≠ `L`.
-
-# Example
-
-```julia
-using FillArrays, StaticArrays: SUnitRange, SVector
-# Forward x-difference: offsets 0, 1; per-column SVector ascending; CSC-friendly.
-forward = LinearStencil{1}(SUnitRange(0, 1), Fill(SVector(-1.0, 1.0), 5))
-J = build(forward, (1:5,), (1:5,))
-
-# Explicit RowAccess (reserved for a future CSR backend):
-forward_row = LinearStencil{1}(RowAccess, SUnitRange(0, 1),
-                               Fill(SVector(-1.0, 1.0), 5))
-```
-
-See [`assemble`](@ref), [`update!`](@ref), [`build`](@ref),
-[`AccessStyle`](@ref).
-"""
-struct LinearStencil{D, O, L, T, N,
-                     A<:AbstractArray{SVector{L, T}, N},
-                     S<:AccessStyle} <: AbstractStencil{S}
-    offsets::SUnitRange{O, L}
-    term::A
-
-    function LinearStencil{D}(
-        ::Type{S},
-        offsets::SUnitRange{O, L},
-        term::AbstractArray{SVector{L, T}, N},
-    ) where {D, S<:AccessStyle, O, L, T, N}
-        D isa Int && D >= 1 || throw(ArgumentError(
-            "stencil dimension D must be a positive Int (got $D)"))
-        D <= N || throw(ArgumentError(
-            "stencil dimension D=$D exceeds coef-array dimension N=$N"))
-        new{D, O, L, T, N, typeof(term), S}(offsets, term)
-    end
-end
-
-# Default outer constructor: bare 2-arg form forwards with ColumnAccess.
-LinearStencil{D}(offsets, term) where {D} =
-    LinearStencil{D}(ColumnAccess, offsets, term)
-
-# Friendly outer constructor: reports specific errors when the inner method's
-# AbstractArray{SVector{L, T}, N} signature does not match (non-array term,
-# non-SVector eltype, SVector length ≠ L). Carries the access-style tag.
-function LinearStencil{D}(
-    ::Type{S},
-    offsets::SUnitRange{O, L},
-    term,
-) where {D, S<:AccessStyle, O, L}
-    term isa AbstractArray || throw(ArgumentError(
-        "term must be an AbstractArray with eltype SVector{$L, T} " *
-        "(got $(typeof(term)))"))
-    E = eltype(term)
-    E <: SVector || throw(ArgumentError(
-        "term eltype must be SVector{$L, T} (got eltype $E); each element is " *
-        "the column's coefficients in ascending-offset order"))
-    length(E) == L || throw(ArgumentError(
-        "term eltype must be SVector{$L, T} to match offsets length L=$L " *
-        "(got SVector length $(length(E)))"))
-    throw(ArgumentError("LinearStencil could not be constructed; term = $term"))
-end
-
-# Fallback for non-SUnitRange offsets — tells the user how to migrate.
-function LinearStencil{D}(::Type{S}, offsets, term) where {D, S<:AccessStyle}
-    throw(ArgumentError(
-        "offsets must be a StaticArrays.SUnitRange (contiguous unit-stride). " *
-        "Got $(typeof(offsets)). Construct one via SUnitRange(δ_min, δ_max), " *
-        "and supply term as an AbstractArray whose elements are SVector{L} of " *
-        "coefficients in ascending-offset order (element[1] is for offset δ_min)."))
-end
+# `LinearStencil` is defined in StencilCore (its coefficient field may be a
+# concrete array or a symbolic term). This file adds the CSC assembly methods,
+# which dispatch on a *concrete-array* coefficient and `S = ColumnAccess`.
 
 """
     _pattern!(rowval, colptr, offsets::SUnitRange{O, L}, row, col)
@@ -272,7 +178,7 @@ function _fill!(
 end
 
 """
-    assemble(st::LinearStencil{1, O, L, T, 1, A, ColumnAccess},
+    assemble(st::LinearStencil{1, O, L, SVector{L, T}, A, ColumnAccess},
              row::NTuple{1, AbstractUnitRange{Int}},
              col::NTuple{1, AbstractUnitRange{Int}}) -> SparseMatrixCSC{T, Int}
 
@@ -290,10 +196,10 @@ Dispatch pins `D = 1`, `N = 1`, and `S = ColumnAccess` (misuse →
 kernel's exact correctness boundary.
 """
 function assemble(
-    st::LinearStencil{1, O, L, T, 1, A, ColumnAccess},
+    st::LinearStencil{1, O, L, SVector{L, T}, A, ColumnAccess},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
-) where {O, L, T, A}
+) where {O, L, T, A<:AbstractArray{SVector{L, T}, 1}}
     L - 1 <= length(row[1]) || throw(ArgumentError(
         "stencil width L=$L exceeds length(row[1])+1=$(length(row[1])+1); " *
         "the three-phase kernel is exact up to L = length(row) + 1, beyond which " *
@@ -308,7 +214,7 @@ end
 
 """
     update!(mat::SparseMatrixCSC{T, Int},
-            st::LinearStencil{1, O, L, T, 1, A, ColumnAccess},
+            st::LinearStencil{1, O, L, SVector{L, T}, A, ColumnAccess},
             row::NTuple{1, AbstractUnitRange{Int}},
             col::NTuple{1, AbstractUnitRange{Int}}) -> mat
 
@@ -319,10 +225,10 @@ same `L − 1 ≤ length(row[1])` guard.
 """
 function update!(
     mat::SparseMatrixCSC{T, Int},
-    st::LinearStencil{1, O, L, T, 1, A, ColumnAccess},
+    st::LinearStencil{1, O, L, SVector{L, T}, A, ColumnAccess},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
-) where {T, O, L, A}
+) where {T, O, L, A<:AbstractArray{SVector{L, T}, 1}}
     L - 1 <= length(row[1]) || throw(ArgumentError(
         "stencil width L=$L exceeds length(row[1])+1=$(length(row[1])+1); " *
         "the three-phase kernel is exact up to L = length(row) + 1, beyond which " *
@@ -346,10 +252,10 @@ end
 end
 
 function assemble(
-    st::LinearStencil{D, O, L, T, N, A, ColumnAccess},
+    st::LinearStencil{D, O, L, SVector{L, T}, A, ColumnAccess},
     row::NTuple{N, AbstractUnitRange{Int}},
     col::NTuple{N, AbstractUnitRange{Int}},
-) where {D, O, L, T, N, A}
+) where {D, O, L, T, N, A<:AbstractArray{SVector{L, T}, N}}
     L - 1 <= length(row[D]) || throw(ArgumentError(
         "stencil width L=$L exceeds length(row[$D])+1=$(length(row[D])+1); " *
         "the three-phase kernel is exact up to L = length(row) + 1, beyond which " *
@@ -366,10 +272,10 @@ end
 
 function update!(
     mat::SparseMatrixCSC{T, Int},
-    st::LinearStencil{D, O, L, T, N, A, ColumnAccess},
+    st::LinearStencil{D, O, L, SVector{L, T}, A, ColumnAccess},
     row::NTuple{N, AbstractUnitRange{Int}},
     col::NTuple{N, AbstractUnitRange{Int}},
-) where {D, O, L, T, N, A}
+) where {D, O, L, T, N, A<:AbstractArray{SVector{L, T}, N}}
     L - 1 <= length(row[D]) || throw(ArgumentError(
         "stencil width L=$L exceeds length(row[$D])+1=$(length(row[D])+1); " *
         "the three-phase kernel is exact up to L = length(row) + 1, beyond which " *
