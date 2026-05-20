@@ -1,72 +1,99 @@
 """
-    LinearStencil{D, O, L, T, N, C<:NTuple{L, AbstractArray{T, N}}}
+    LinearStencil{D, O, L, T, N, A<:AbstractArray{SVector{L, T}, N}, S<:AccessStyle}
+        <: AbstractStencil{S}
 
 Variable-coefficient stencil with **contiguous** offsets, aligned with mesh
-dimension `D`. For column `c` at mesh position `p_c` and offset `δ`, the
-matrix entry lands on row `p_c − δ` with coefficient `coefs[δ − O + 1][p_c]`
-— coefs are **column-anchored** and indexed in **ascending offset order**.
+dimension `D`. Offsets are **diagonal indices** in the
+numerical-linear-algebra sense: for a column `j` and a row `i` the diagonal
+number is `k = j − i`. For column `c` at mesh position `p_c` and offset
+`δ`, the matrix entry lands on row `p_c − δ` with coefficient
+`term[p_c][δ − O + 1]` — the coefficient array is **column-anchored** under
+`S = ColumnAccess`, and each element `term[p_c]` is the `SVector{L}` of all
+`L` per-offset coefficients on that column in **ascending offset order**
+(`term[p_c][1]` ↦ offset `O`).
 
-Type parameters: `D` is the mesh dim (1-based, `1 ≤ D ≤ N`); `O = Δ_min`
-and `L = Δ_max − Δ_min + 1` are static via the `SUnitRange` type; `T`, `N`
-are the shared coef `eltype` / `ndims`; `C` is the concrete coef-tuple
-type. Heterogeneous coef containers (e.g. `Fill` + `Vector` +
-`OffsetArray`) are fine if `eltype` / `ndims` agree.
+Type parameters:
+- `D`: mesh dim along which the stencil acts (1-based, `1 ≤ D ≤ N`).
+- `O = δ_min`, `L = δ_max − δ_min + 1` — static via `SUnitRange`.
+- `T`, `N`: scalar coef `eltype` and array `ndims`.
+- `A`: concrete coef-array type; `eltype(A) == SVector{L, T}`.
+- `S<:AccessStyle`: anchoring of the coefficient array
+  (`ColumnAccess` for CSC, `RowAccess` reserved for CSR).
 
-Inner constructor `LinearStencil{D}(offsets::SUnitRange{O, L}, coefs)`
-checks `D ≥ 1` and `D ≤ N`; unit-ascending offset order is forced by the
-`SUnitRange` type. A catch-all outer constructor reports `ArgumentError`s
-for non-`SUnitRange` offsets, length mismatch, mixed `eltype` / `ndims`.
+Inner constructor `LinearStencil{D}(::Type{S}, offsets::SUnitRange{O, L}, term)`
+checks `D ≥ 1` and `D ≤ N`; the `SVector{L}` element length is tied to the
+offset count `L` at the type level (a mismatch fails dispatch). The default
+outer constructor (no `::Type{S}` argument) defaults `S` to `ColumnAccess`. A
+catch-all outer constructor reports `ArgumentError`s for non-`SUnitRange`
+offsets, non-array `term`, non-`SVector` eltype, and `SVector` length ≠ `L`.
 
 # Example
 
 ```julia
-using FillArrays, StaticArrays: SUnitRange
-# Forward x-difference: offsets 0, 1; coefs ascending.
-forward = LinearStencil{1}(SUnitRange(0, 1), (Fill(-1.0, 5), Fill(1.0, 5)))
+using FillArrays, StaticArrays: SUnitRange, SVector
+# Forward x-difference: offsets 0, 1; per-column SVector ascending; CSC-friendly.
+forward = LinearStencil{1}(SUnitRange(0, 1), Fill(SVector(-1.0, 1.0), 5))
 J = build(forward, (1:5,), (1:5,))
+
+# Explicit RowAccess (reserved for a future CSR backend):
+forward_row = LinearStencil{1}(RowAccess, SUnitRange(0, 1),
+                               Fill(SVector(-1.0, 1.0), 5))
 ```
 
-See [`assemble`](@ref), [`update!`](@ref), [`build`](@ref).
+See [`assemble`](@ref), [`update!`](@ref), [`build`](@ref),
+[`AccessStyle`](@ref).
 """
-struct LinearStencil{D, O, L, T, N, C<:NTuple{L, AbstractArray{T, N}}}
+struct LinearStencil{D, O, L, T, N,
+                     A<:AbstractArray{SVector{L, T}, N},
+                     S<:AccessStyle} <: AbstractStencil{S}
     offsets::SUnitRange{O, L}
-    coefs::C
+    term::A
 
     function LinearStencil{D}(
+        ::Type{S},
         offsets::SUnitRange{O, L},
-        coefs::NTuple{L, AbstractArray{T, N}},
-    ) where {D, O, L, T, N}
+        term::AbstractArray{SVector{L, T}, N},
+    ) where {D, S<:AccessStyle, O, L, T, N}
         D isa Int && D >= 1 || throw(ArgumentError(
             "stencil dimension D must be a positive Int (got $D)"))
         D <= N || throw(ArgumentError(
             "stencil dimension D=$D exceeds coef-array dimension N=$N"))
-        new{D, O, L, T, N, typeof(coefs)}(offsets, coefs)
+        new{D, O, L, T, N, typeof(term), S}(offsets, term)
     end
 end
 
+# Default outer constructor: bare 2-arg form forwards with ColumnAccess.
+LinearStencil{D}(offsets, term) where {D} =
+    LinearStencil{D}(ColumnAccess, offsets, term)
+
 # Friendly outer constructor: reports specific errors when the inner method's
-# NTuple{L, AbstractArray{T, N}} signature does not match (length mismatch,
-# non-array elements, mixed eltype, mixed ndims).
-function LinearStencil{D}(offsets::SUnitRange{O, L}, coefs::Tuple) where {D, O, L}
-    length(coefs) == L || throw(ArgumentError(
-        "offsets has length $L but coefs has length $(length(coefs))"))
-    all(c -> c isa AbstractArray, coefs) || throw(ArgumentError(
-        "each coef must be an AbstractArray (got $(map(typeof, coefs)))"))
-    Ts = map(eltype, coefs)
-    all(==(first(Ts)), Ts) || throw(ArgumentError(
-        "all coefs must share the same eltype (got $Ts)"))
-    Ns = map(ndims, coefs)
-    all(==(first(Ns)), Ns) || throw(ArgumentError(
-        "all coefs must share the same ndims (got $Ns)"))
-    throw(ArgumentError("LinearStencil could not be constructed; coefs = $coefs"))
+# AbstractArray{SVector{L, T}, N} signature does not match (non-array term,
+# non-SVector eltype, SVector length ≠ L). Carries the access-style tag.
+function LinearStencil{D}(
+    ::Type{S},
+    offsets::SUnitRange{O, L},
+    term,
+) where {D, S<:AccessStyle, O, L}
+    term isa AbstractArray || throw(ArgumentError(
+        "term must be an AbstractArray with eltype SVector{$L, T} " *
+        "(got $(typeof(term)))"))
+    E = eltype(term)
+    E <: SVector || throw(ArgumentError(
+        "term eltype must be SVector{$L, T} (got eltype $E); each element is " *
+        "the column's coefficients in ascending-offset order"))
+    length(E) == L || throw(ArgumentError(
+        "term eltype must be SVector{$L, T} to match offsets length L=$L " *
+        "(got SVector length $(length(E)))"))
+    throw(ArgumentError("LinearStencil could not be constructed; term = $term"))
 end
 
 # Fallback for non-SUnitRange offsets — tells the user how to migrate.
-function LinearStencil{D}(offsets, coefs) where {D}
+function LinearStencil{D}(::Type{S}, offsets, term) where {D, S<:AccessStyle}
     throw(ArgumentError(
         "offsets must be a StaticArrays.SUnitRange (contiguous unit-stride). " *
-        "Got $(typeof(offsets)). Construct one via SUnitRange(Δ_min, Δ_max), " *
-        "and supply coefs in ascending-offset order (coefs[1] is for offset Δ_min)."))
+        "Got $(typeof(offsets)). Construct one via SUnitRange(δ_min, δ_max), " *
+        "and supply term as an AbstractArray whose elements are SVector{L} of " *
+        "coefficients in ascending-offset order (element[1] is for offset δ_min)."))
 end
 
 """
@@ -172,17 +199,19 @@ function _pattern!(
 end
 
 """
-    _fill!(nzval, offsets::SUnitRange{O, L}, coefs, row, col)
+    _fill!(nzval, offsets::SUnitRange{O, L}, term, row, col)
 
 1-D fill kernel — same three-phase shape as [`_pattern!`](@ref); writes
-only `nzval`, never touches `colptr`. Indexes `coefs[k]` with
-`k = δ − O + 1` (ascending offset order). Allocation-free apart from
-`coefs[k]` `getindex` (O(1) for `Vector` / `Fill` / `OffsetArray`).
+only `nzval`, never touches `colptr`. Fetches the column's coefficient
+`SVector` once per active column (`sv = term[c]`) and reads slot
+`k = δ − O + 1` (ascending offset order). Allocation-free apart from the
+single `term[c]` `getindex` per active column (O(1) for `Vector` / `Fill`
+/ `OffsetArray`; an `SVector{L}` is isbits and returned by value).
 """
 function _fill!(
     nzval::AbstractVector{T},
     offsets::SUnitRange{O, L},
-    coefs::NTuple{L, AbstractArray{T, 1}},
+    term::AbstractArray{SVector{L, T}, 1},
     row::AbstractUnitRange{Int},
     col::AbstractUnitRange{Int},
 ) where {O, L, T}
@@ -201,22 +230,26 @@ function _fill!(
     # Left ramp: δ descends from c − rmin to δ_lo. k = δ − O + 1.
     for c in cmin:(c_LR - 1)
         active = max(0, c - rmin - δ_lo + 1)
-        for i in 0:(active - 1)
-            δ = (c - rmin) - i
-            k = δ - O + 1
-            nzval[cur + i] = coefs[k][c]
+        if active > 0
+            sv = term[c]
+            for i in 0:(active - 1)
+                δ = (c - rmin) - i
+                k = δ - O + 1
+                nzval[cur + i] = sv[k]
+            end
+            cur += active
         end
-        cur += active
     end
 
     # Interior: closed-form cur(c); δ descends from δ_hi to δ_lo.
     cur_int_0 = cur
     for c in c_LR:c_RR
         cur_c = cur_int_0 + Leff * (c - c_LR)
+        sv = term[c]
         for i in 0:(Leff - 1)
             δ = δ_hi - i
             k = δ - O + 1
-            nzval[cur_c + i] = coefs[k][c]
+            nzval[cur_c + i] = sv[k]
         end
     end
     cur = cur_int_0 + Leff * max(0, c_RR - c_LR + 1)
@@ -225,18 +258,21 @@ function _fill!(
     for c in (c_RR + 1):cmax
         r0     = c - δ_hi - rmin + 1
         active = max(0, rmax - rmin + 1 - r0 + 1)
-        for i in 0:(active - 1)
-            δ = δ_hi - i
-            k = δ - O + 1
-            nzval[cur + i] = coefs[k][c]
+        if active > 0
+            sv = term[c]
+            for i in 0:(active - 1)
+                δ = δ_hi - i
+                k = δ - O + 1
+                nzval[cur + i] = sv[k]
+            end
+            cur += active
         end
-        cur += active
     end
     return
 end
 
 """
-    assemble(st::LinearStencil{1, O, L, T, 1},
+    assemble(st::LinearStencil{1, O, L, T, 1, A, ColumnAccess},
              row::NTuple{1, AbstractUnitRange{Int}},
              col::NTuple{1, AbstractUnitRange{Int}}) -> SparseMatrixCSC{T, Int}
 
@@ -249,15 +285,15 @@ in one shot.
 column `c ∈ col[1]` and offset `δ` lands on row `c − δ` iff it lies in
 `row[1]`.
 
-Dispatch pins `D = 1` and `N = 1` (misuse → `MethodError`); the
-`L − 1 ≤ length(row[1])` guard is the three-phase kernel's exact
-correctness boundary.
+Dispatch pins `D = 1`, `N = 1`, and `S = ColumnAccess` (misuse →
+`MethodError`); the `L − 1 ≤ length(row[1])` guard is the three-phase
+kernel's exact correctness boundary.
 """
 function assemble(
-    st::LinearStencil{1, O, L, T, 1},
+    st::LinearStencil{1, O, L, T, 1, A, ColumnAccess},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
-) where {O, L, T}
+) where {O, L, T, A}
     L - 1 <= length(row[1]) || throw(ArgumentError(
         "stencil width L=$L exceeds length(row[1])+1=$(length(row[1])+1); " *
         "the three-phase kernel is exact up to L = length(row) + 1, beyond which " *
@@ -271,7 +307,8 @@ function assemble(
 end
 
 """
-    update!(mat::SparseMatrixCSC{T, Int}, st::LinearStencil{1, O, L, T, 1},
+    update!(mat::SparseMatrixCSC{T, Int},
+            st::LinearStencil{1, O, L, T, 1, A, ColumnAccess},
             row::NTuple{1, AbstractUnitRange{Int}},
             col::NTuple{1, AbstractUnitRange{Int}}) -> mat
 
@@ -282,15 +319,15 @@ same `L − 1 ≤ length(row[1])` guard.
 """
 function update!(
     mat::SparseMatrixCSC{T, Int},
-    st::LinearStencil{1, O, L, T, 1},
+    st::LinearStencil{1, O, L, T, 1, A, ColumnAccess},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
-) where {T, O, L}
+) where {T, O, L, A}
     L - 1 <= length(row[1]) || throw(ArgumentError(
         "stencil width L=$L exceeds length(row[1])+1=$(length(row[1])+1); " *
         "the three-phase kernel is exact up to L = length(row) + 1, beyond which " *
         "the saturated-middle phase would be required and is out of scope"))
-    _fill!(mat.nzval, st.offsets, st.coefs, row[1], col[1])
+    _fill!(mat.nzval, st.offsets, st.term, row[1], col[1])
     return mat
 end
 
@@ -309,10 +346,10 @@ end
 end
 
 function assemble(
-    st::LinearStencil{D, O, L, T, N},
+    st::LinearStencil{D, O, L, T, N, A, ColumnAccess},
     row::NTuple{N, AbstractUnitRange{Int}},
     col::NTuple{N, AbstractUnitRange{Int}},
-) where {D, O, L, T, N}
+) where {D, O, L, T, N, A}
     L - 1 <= length(row[D]) || throw(ArgumentError(
         "stencil width L=$L exceeds length(row[$D])+1=$(length(row[D])+1); " *
         "the three-phase kernel is exact up to L = length(row) + 1, beyond which " *
@@ -329,15 +366,15 @@ end
 
 function update!(
     mat::SparseMatrixCSC{T, Int},
-    st::LinearStencil{D, O, L, T, N},
+    st::LinearStencil{D, O, L, T, N, A, ColumnAccess},
     row::NTuple{N, AbstractUnitRange{Int}},
     col::NTuple{N, AbstractUnitRange{Int}},
-) where {D, O, L, T, N}
+) where {D, O, L, T, N, A}
     L - 1 <= length(row[D]) || throw(ArgumentError(
         "stencil width L=$L exceeds length(row[$D])+1=$(length(row[D])+1); " *
         "the three-phase kernel is exact up to L = length(row) + 1, beyond which " *
         "the saturated-middle phase would be required and is out of scope"))
-    _fill_nd!(mat.nzval, st.offsets, st.coefs, row, col, Val(D), Val(N),
+    _fill_nd!(mat.nzval, st.offsets, st.term, row, col, Val(D), Val(N),
               1, 1, 0, ())
     return mat
 end
@@ -547,13 +584,14 @@ end
 end
 
 """
-    _fill_nd!(nzval, offsets, coefs, row, col, ::Val{D}, ::Val{Nd},
+    _fill_nd!(nzval, offsets, term, row, col, ::Val{D}, ::Val{Nd},
               nzval_idx, active, k_hi, outer_coords) -> nzval_idx
 
 Recursive N-D fill kernel. Mirrors `_pattern_nd!` structure; threads
 `nzval_idx` (next free index in `nzval`) and `outer_coords` (mesh
 coordinates of already-peeled dimensions, in the order matching coef
-array axes) so coef indexing at the base is `coefs[k][c_1, outer_coords...]`.
+array axes) so coef indexing at the base fetches the column's `SVector`
+once (`sv = term[c_1, outer_coords...]`) and reads slot `k`.
 
 Threaded `active`, `k_hi` are set when peeling the stencil dim
 (`Nd == D`), consumed at the inner intersection base.
@@ -564,7 +602,7 @@ function _fill_nd! end
 @inline function _fill_nd!(
     nzval::AbstractVector{T},
     offsets::SUnitRange{O, L},
-    coefs::NTuple{L, AbstractArray{T, N_coef}},
+    term::AbstractArray{SVector{L, T}, N_coef},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
     ::Val{1}, ::Val{1},
@@ -583,9 +621,10 @@ function _fill_nd! end
         δ_lo_c = max(δ_lo, c - rmax)
         δ_hi_c = min(δ_hi, c - rmin)
         if δ_lo_c <= δ_hi_c
+            sv = term[c, outer_coords...]
             for δ in δ_hi_c:-1:δ_lo_c
                 k = δ - O + 1
-                nzval[nzval_idx] = coefs[k][c, outer_coords...]
+                nzval[nzval_idx] = sv[k]
                 nzval_idx += 1
             end
         end
@@ -597,7 +636,7 @@ end
 @inline function _fill_nd!(
     nzval::AbstractVector{T},
     offsets::SUnitRange{O, L},
-    coefs::NTuple{L, AbstractArray{T, N_coef}},
+    term::AbstractArray{SVector{L, T}, N_coef},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
     ::Val{D}, ::Val{1},
@@ -610,9 +649,10 @@ end
 
     for c in cmin:cmax
         if c >= rmin && c <= rmax && active > 0
+            sv = term[c, outer_coords...]
             for i in 0:(active - 1)
                 k = k_hi - i
-                nzval[nzval_idx] = coefs[k][c, outer_coords...]
+                nzval[nzval_idx] = sv[k]
                 nzval_idx += 1
             end
         end
@@ -624,7 +664,7 @@ end
 @inline function _fill_nd!(
     nzval::AbstractVector{T},
     offsets::SUnitRange{O, L},
-    coefs::NTuple{L, AbstractArray{T, N_coef}},
+    term::AbstractArray{SVector{L, T}, N_coef},
     row::NTuple{Nd, AbstractUnitRange{Int}},
     col::NTuple{Nd, AbstractUnitRange{Int}},
     ::Val{Nd}, ::Val{Nd},
@@ -646,7 +686,7 @@ end
         active_c = max(0, δ_hi_c - δ_lo_c + 1)
         k_hi_c = δ_hi_c - O + 1
         nzval_idx = _fill_nd!(
-            nzval, offsets, coefs, row_rest, col_rest,
+            nzval, offsets, term, row_rest, col_rest,
             Val(Nd), Val(Nd - 1),
             nzval_idx, active_c, k_hi_c,
             (c_last, outer_coords...),
@@ -659,7 +699,7 @@ end
 @inline function _fill_nd!(
     nzval::AbstractVector{T},
     offsets::SUnitRange{O, L},
-    coefs::NTuple{L, AbstractArray{T, N_coef}},
+    term::AbstractArray{SVector{L, T}, N_coef},
     row::NTuple{Nd, AbstractUnitRange{Int}},
     col::NTuple{Nd, AbstractUnitRange{Int}},
     ::Val{D}, ::Val{Nd},
@@ -675,7 +715,7 @@ end
     for c_last in cmin_last:cmax_last
         if c_last >= rmin_last && c_last <= rmax_last
             nzval_idx = _fill_nd!(
-                nzval, offsets, coefs, row_rest, col_rest,
+                nzval, offsets, term, row_rest, col_rest,
                 Val(D), Val(Nd - 1),
                 nzval_idx, active, k_hi,
                 (c_last, outer_coords...),

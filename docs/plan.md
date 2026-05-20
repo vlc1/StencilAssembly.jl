@@ -11,21 +11,32 @@ Historical: [`docs/superpowers/specs/2026-05-12-cartesian-operators-design.md`](
 
 **Implemented** (canonical spec in [`AGENTS.md`](../AGENTS.md)):
 
-- `LinearStencil{D, O, L, T, N, C<:NTuple{L, AbstractArray{T, N}}}` with
-  contiguous unit-stride offsets (`SUnitRange{O, L}`) and ascending coefs.
-- 1-D `assemble` / `update!` / `build` (`LinearStencil{1, O, L, T, 1}` ×
-  `NTuple{1, AbstractUnitRange{Int}}` → `SparseMatrixCSC{T, Int}`) with
-  the `L − 1 ≤ length(row[1])` runtime guard.
-- Three-phase contiguous kernel: closed-form interior `cur(c)`, ramps
-  with `max(0, active)` off-mesh clipping. One `resize!`; otherwise
-  allocation-free.
-- Test suite: constructor, direct kernels, integration vs the
-  brute-force oracle, edge cases (`L = 0`, full/partial trim, off-mesh
-  tails, the `L = m + 1` boundary, the `L > m + 1` guard), `D ≤ N`
-  invariant.
+- `LinearStencil{D, O, L, T, N, A<:AbstractArray{SVector{L, T}, N}, S<:AccessStyle}`
+  `<: AbstractStencil{S}` with contiguous unit-stride offsets
+  (`SUnitRange{O, L}`) and a single coefficient array `term` whose
+  elements are per-column `SVector{L}`s in ascending offset order.
+- `StarStencil{L, T, N, M, C<:NTuple{N, AbstractArray{SVector{M, T}, N}}, S}`
+  (`<: AbstractStencil{S}`) — N-D star-shaped operator with per-axis
+  reach `−L … +L`, diagonal entries merged across axes
+  (`A[r, r] = Σ_d terms[d][c][L + 1]`). See [`docs/star.md`](star.md)
+  for the design.
+- `AccessStyle` Holy trait (`ColumnAccess` / `RowAccess`) +
+  `AbstractStencil` supertype. Assemblers dispatch on `S = ColumnAccess`
+  for CSC output; `RowAccess` reserved for future CSR. See
+  [`docs/term.md`](term.md).
+- 1-D / N-D `assemble` / `update!` / `build` for both stencils with the
+  per-axis `L − 1 ≤ length(row[D])` (LinearStencil) and
+  `2L ≤ length(row[d]) ∀ d` (StarStencil) guards.
+- Three-phase contiguous kernel for LinearStencil: closed-form interior
+  `cur(c)`, ramps with `max(0, active)` off-mesh clipping. One
+  `resize!`; otherwise allocation-free. StarStencil kernels follow the
+  same dimension-peeling pattern with a 3-way per-column branch.
+- Test suite: constructors, direct kernels, integration vs the
+  brute-force oracle (`sum(LinearStencils)` for StarStencil), edge
+  cases, guards, `D ≤ N` invariant, access-style + supertype trait.
 
 Deliberately out of scope: named convenience constants, scalar-coef
-sugar, non-contiguous offsets, arbitrary-mask row/col.
+sugar, non-contiguous offsets, arbitrary-mask row/col, CSR assembly.
 
 ## Roadmap
 
@@ -98,10 +109,11 @@ function _pattern_nd!(
 
 Same case split and state threading; threads `nzval_idx` instead of
 `(cur, col_j)` (colptr already built). At the base case, walks the
-same offset sequence per valid column and writes
-`nzval[nzval_idx + i] = coefs[k][c_1, outer_coords...]` with
-`k = δ − O + 1`. Outer mesh coords are threaded as an `NTuple` built
-during non-D dim peeling, so coef indexing is dimension-agnostic.
+same offset sequence per valid column, fetches the column's `SVector`
+once (`sv = term[c_1, outer_coords...]`), and writes
+`nzval[nzval_idx + i] = sv[k]` with `k = δ − O + 1`. Outer mesh coords
+are threaded as an `NTuple` built during non-D dim peeling, so coef
+indexing is dimension-agnostic.
 
 #### Implementation order
 

@@ -1,5 +1,21 @@
 # Plan: `StarStencil` — N-D variable-coefficient Laplacian-shape operator
 
+> **Note (historical).** Type signatures and the field name in this
+> document reflect the initial `StarStencil` design. The current
+> shape includes a trailing `S<:AccessStyle` type parameter and the
+> field is named `terms` (not `coefs`); the struct subtypes
+> `AbstractStencil{S}`. **Coefficient storage has also changed from
+> struct-of-arrays to array-of-structs:** instead of
+> `NTuple{N, NTuple{M, AbstractArray{T, N}}}` (one array per axis per
+> offset), terms are now `NTuple{N, AbstractArray{SVector{M, T}, N}}`
+> (one array per axis, each element the column's `SVector{M}` of offset
+> coefficients). Read access `coefs[d][k][c]` below is now
+> `terms[d][c][k]`, and the diagonal merge `Σ_d coefs[d][L+1][c]` is
+> `Σ_d terms[d][c][L+1]`. See [`docs/term.md`](term.md) and
+> [`AGENTS.md`](../AGENTS.md) for the current canonical spec. The
+> algorithmic content below (kernels, emission order, guards) is
+> unchanged.
+
 ## Context
 
 The package currently exposes `LinearStencil{D, …}`, an axis-aligned 1-D

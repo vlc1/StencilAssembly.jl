@@ -1,126 +1,158 @@
 """
-    StarStencil{L, T, N, M, C <: NTuple{N, NTuple{M, AbstractArray{T, N}}}}
+    StarStencil{L, T, N, M, C<:NTuple{N, AbstractArray{SVector{M, T}, N}}, S<:AccessStyle}
+        <: AbstractStencil{S}
 
 N-D variable-coefficient star-shaped stencil with symmetric reach `−L … +L`
-along every mesh dimension. The action on a discrete field `φ` at mesh
-position `(i_1, …, i_N)` is
+along every mesh dimension. Per-axis offsets are **diagonal indices** in
+the numerical-linear-algebra sense: along axis `d`, for column `c_d` and
+row `r_d`, the diagonal number is `δ_d = c_d − r_d`. Each offset
+`δ ∈ −L:L` along axis `d` produces an entry at row coord `c_d − δ`
+in that dimension, identity in all others.
 
-    ψ[i_1, …, i_N] = Σ_d Σ_{δ = −L}^{L} coefs[d][δ + L + 1][i_1, …] · φ[…, i_d − δ, …]
+The action on a discrete field `φ` at mesh position `(i_1, …, i_N)` is
 
-i.e., axis `d`'s 1-D stencil acts along the `d`-th coordinate only. The
-diagonal sums the per-axis δ=0 contributions:
-`A[r, r] = Σ_d coefs[d][L + 1][c]` (single CSC entry, merged).
+    ψ[i_1, …, i_N] = Σ_d Σ_{δ = −L}^{L} terms[d][i_1, …][δ + L + 1] · φ[…, i_d − δ, …]
 
-Type parameters: `L ≥ 1` is the per-axis reach; `M = 2L + 1` is the
-number of offsets per axis; `T`, `N` are the shared coef `eltype` /
-`ndims`; `C` is the concrete nested-tuple coef container.
+The diagonal sums the per-axis δ=0 contributions:
+`A[r, r] = Σ_d terms[d][c][L + 1]` (single CSC entry, merged).
 
-`coefs[d][k][c_idx...]` is the coefficient at column mesh position
-`c_idx` for axis `d`, offset `δ = k − L − 1`. Coef arrays are
-column-anchored — caller's responsibility for axes covering `col`.
+Type parameters:
+- `L ≥ 1` is the per-axis reach; `M = 2L + 1` is the number of offsets
+  per axis.
+- `T`, `N`: scalar coef `eltype` and array `ndims`.
+- `C`: concrete coef container — one `AbstractArray{SVector{M, T}, N}`
+  per axis.
+- `S<:AccessStyle`: anchoring of the coefficient arrays
+  (`ColumnAccess` for CSC, `RowAccess` reserved for CSR).
+
+`terms[d][c_idx...][k]` is the coefficient at column mesh position
+`c_idx` for axis `d`, offset `δ = k − L − 1` (under `S = ColumnAccess`):
+each `terms[d][c_idx...]` is the per-axis `SVector{M}` of offset
+coefficients on that column. Coef arrays' axes must cover the
+column-side mesh range supplied to `assemble` / `update!`.
+
+# Construction
+
+```julia
+# Default (ColumnAccess):
+StarStencil{1}(coefs_tuple)
+
+# Explicit access style (positional Type tag):
+StarStencil{1}(RowAccess, coefs_tuple)
+```
 
 # Example
 
 ```julia
-using FillArrays
+using FillArrays, StaticArrays: SVector
 n1, n2 = 5, 4
-# 2-D negative Laplacian on a 5×4 mesh.
+# 2-D negative Laplacian on a 5×4 mesh; one SVector per axis per column.
 coefs = (
-    (Fill(-1.0, n1, n2), Fill(2.0, n1, n2), Fill(-1.0, n1, n2)),
-    (Fill(-1.0, n1, n2), Fill(2.0, n1, n2), Fill(-1.0, n1, n2)),
+    Fill(SVector(-1.0, 2.0, -1.0), n1, n2),
+    Fill(SVector(-1.0, 2.0, -1.0), n1, n2),
 )
 st = StarStencil{1}(coefs)
 J = build(st, (1:n1, 1:n2), (1:n1, 1:n2))
 ```
 
-See [`assemble`](@ref), [`update!`](@ref), [`build`](@ref).
+See [`assemble`](@ref), [`update!`](@ref), [`build`](@ref),
+[`AccessStyle`](@ref).
 """
-struct StarStencil{L, T, N, M, C <: NTuple{N, NTuple{M, AbstractArray{T, N}}}}
-    coefs::C
+struct StarStencil{L, T, N, M,
+                   C<:NTuple{N, AbstractArray{SVector{M, T}, N}},
+                   S<:AccessStyle} <: AbstractStencil{S}
+    terms::C
 
     function StarStencil{L}(
-        coefs::NTuple{N, NTuple{M, AbstractArray{T, N}}},
-    ) where {L, T, N, M}
+        ::Type{S},
+        terms::NTuple{N, AbstractArray{SVector{M, T}, N}},
+    ) where {L, S<:AccessStyle, T, N, M}
         L isa Int && L >= 1 || throw(ArgumentError(
             "stencil reach L must be a positive Int (got $L)"))
         M == 2L + 1 || throw(ArgumentError(
-            "coefs inner tuple length must be 2L+1=$(2L + 1) (got $M)"))
-        new{L, T, N, M, typeof(coefs)}(coefs)
+            "per-axis SVector length must be 2L+1=$(2L + 1) (got $M)"))
+        new{L, T, N, M, typeof(terms), S}(terms)
     end
 end
 
+# Default outer constructor: bare 1-arg form forwards with ColumnAccess.
+StarStencil{L}(terms) where {L} = StarStencil{L}(ColumnAccess, terms)
+
 # Friendly outer constructor: reports specific errors when the inner method's
-# NTuple{N, NTuple{M, AbstractArray{T, N}}} signature does not match.
-function StarStencil{L}(coefs::Tuple) where {L}
+# NTuple{N, AbstractArray{SVector{M, T}, N}} signature does not match.
+function StarStencil{L}(::Type{S}, terms::Tuple) where {L, S<:AccessStyle}
     L isa Int && L >= 1 || throw(ArgumentError(
         "stencil reach L must be a positive Int (got $L)"))
     M_expected = 2L + 1
-    all(c -> c isa Tuple, coefs) || throw(ArgumentError(
-        "each per-axis coef container must be a Tuple " *
-        "(got $(map(typeof, coefs)))"))
-    all(c -> length(c) == M_expected, coefs) || throw(ArgumentError(
-        "each per-axis coef tuple must have length 2L+1=$M_expected " *
-        "(got $(map(length, coefs)))"))
-    flat = tuple((c for axis in coefs for c in axis)...)
-    all(c -> c isa AbstractArray, flat) || throw(ArgumentError(
-        "each coef must be an AbstractArray (got $(map(typeof, flat)))"))
-    Ts = map(eltype, flat)
+    all(c -> c isa AbstractArray, terms) || throw(ArgumentError(
+        "each per-axis term must be an AbstractArray of SVector{$M_expected} " *
+        "(got $(map(typeof, terms)))"))
+    Es = map(eltype, terms)
+    all(E -> E <: SVector, Es) || throw(ArgumentError(
+        "each per-axis term eltype must be SVector{$M_expected, T} " *
+        "(got eltypes $Es)"))
+    all(E -> length(E) == M_expected, Es) || throw(ArgumentError(
+        "each per-axis term eltype must be SVector{$M_expected, T} to match " *
+        "2L+1=$M_expected (got SVector lengths $(map(length, Es)))"))
+    Ts = map(eltype, Es)
     all(==(first(Ts)), Ts) || throw(ArgumentError(
-        "all coefs must share the same eltype (got $Ts)"))
-    Ns = map(ndims, flat)
+        "all terms must share the same scalar eltype (got $Ts)"))
+    Ns = map(ndims, terms)
     all(==(first(Ns)), Ns) || throw(ArgumentError(
-        "all coefs must share the same ndims (got $Ns)"))
-    first(Ns) == length(coefs) || throw(ArgumentError(
-        "coef arrays must have ndims == N = $(length(coefs)) " *
+        "all terms must share the same ndims (got $Ns)"))
+    first(Ns) == length(terms) || throw(ArgumentError(
+        "term arrays must have ndims == N = $(length(terms)) " *
         "(got $(first(Ns)))"))
-    throw(ArgumentError("StarStencil could not be constructed; coefs = $coefs"))
+    throw(ArgumentError("StarStencil could not be constructed; terms = $terms"))
 end
 
-# Catch-all for non-Tuple coefs.
-function StarStencil{L}(coefs) where {L}
+# Catch-all for non-Tuple terms.
+function StarStencil{L}(::Type{S}, terms) where {L, S<:AccessStyle}
     throw(ArgumentError(
-        "coefs must be an NTuple{N, NTuple{M, AbstractArray{T, N}}} " *
-        "(got $(typeof(coefs)))"))
+        "terms must be an NTuple{N, AbstractArray{SVector{M, T}, N}} " *
+        "(got $(typeof(terms)))"))
 end
 
 """
-    _as_linear(st::StarStencil{L, T, 1}) -> LinearStencil{1}
+    _as_linear(st::StarStencil{L, T, 1, M, C, S}) -> LinearStencil{1, …, S}
 
 Convert a 1-D `StarStencil` to the equivalent `LinearStencil{1}` with
-offsets `−L … +L` and the same per-cell coefficient arrays. The 1-D
-`assemble` / `update!` methods for `StarStencil` delegate through this.
+offsets `−L … +L` and the same per-cell coefficient arrays. Preserves
+the access style. The 1-D `assemble` / `update!` methods for
+`StarStencil` delegate through this.
 """
-_as_linear(st::StarStencil{L, T, 1}) where {L, T} =
-    LinearStencil{1}(SUnitRange(-L, L), st.coefs[1])
+_as_linear(st::StarStencil{L, T, 1, M, C, S}) where {L, T, M, C, S} =
+    LinearStencil{1}(S, SUnitRange(-L, L), st.terms[1])
 
 """
-    assemble(st::StarStencil{L, T, 1}, row, col) -> SparseMatrixCSC{T, Int}
+    assemble(st::StarStencil{L, T, 1, M, C, ColumnAccess}, row, col) -> SparseMatrixCSC{T, Int}
 
-1-D `StarStencil` assembly delegates to the equivalent
-`LinearStencil{1}` — no parallel codepath.
+1-D `StarStencil` (with `ColumnAccess`) assembly delegates to the
+equivalent `LinearStencil{1, …, ColumnAccess}` — no parallel codepath.
 """
 assemble(
-    st::StarStencil{L, T, 1},
+    st::StarStencil{L, T, 1, M, C, ColumnAccess},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
-) where {L, T} = assemble(_as_linear(st), row, col)
+) where {L, T, M, C} = assemble(_as_linear(st), row, col)
 
 """
-    update!(mat, st::StarStencil{L, T, 1}, row, col) -> mat
+    update!(mat, st::StarStencil{L, T, 1, M, C, ColumnAccess}, row, col) -> mat
 
-1-D `StarStencil` update delegates to the equivalent `LinearStencil{1}`.
+1-D `StarStencil` (with `ColumnAccess`) update delegates to the
+equivalent `LinearStencil{1, …, ColumnAccess}`.
 """
 update!(
     mat::SparseMatrixCSC{T, Int},
-    st::StarStencil{L, T, 1},
+    st::StarStencil{L, T, 1, M, C, ColumnAccess},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
-) where {L, T} = update!(mat, _as_linear(st), row, col)
+) where {L, T, M, C} = update!(mat, _as_linear(st), row, col)
 
 """
-    assemble(st::StarStencil{L, T, N}, row, col) -> SparseMatrixCSC{T, Int}
+    assemble(st::StarStencil{L, T, N, M, C, ColumnAccess}, row, col) -> SparseMatrixCSC{T, Int}
 
-N-D entry (`N ≥ 2`). Enforces the per-axis guard
+N-D entry (`N ≥ 2`, `S = ColumnAccess`). Enforces the per-axis guard
 `2L ≤ length(row[d])` for every `d ∈ 1:N` — this is the LinearStencil
 correctness bound applied independently per axis, and it also implies
 the cross-axis row-ordering invariant the kernel relies on (axis-d's
@@ -131,10 +163,10 @@ Builds `colptr` / `rowval` and allocates uninitialised `nzval`; call
 [`update!`](@ref) to populate values, or use [`build`](@ref) to do both.
 """
 function assemble(
-    st::StarStencil{L, T, N, M},
+    st::StarStencil{L, T, N, M, C, ColumnAccess},
     row::NTuple{N, AbstractUnitRange{Int}},
     col::NTuple{N, AbstractUnitRange{Int}},
-) where {L, T, N, M}
+) where {L, T, N, M, C}
     for d in 1:N
         2L <= length(row[d]) || throw(ArgumentError(
             "stencil reach 2L=$(2L) exceeds length(row[$d])=$(length(row[d])); " *
@@ -151,25 +183,26 @@ function assemble(
 end
 
 """
-    update!(mat, st::StarStencil{L, T, N}, row, col) -> mat
+    update!(mat, st::StarStencil{L, T, N, M, C, ColumnAccess}, row, col) -> mat
 
-N-D in-place value update (`N ≥ 2`); carries the same per-axis guard as
-[`assemble`](@ref). `mat` must have been produced by a matching
-`assemble` so its `colptr`/`rowval` align with the kernel's sweep.
+N-D in-place value update (`N ≥ 2`, `S = ColumnAccess`); carries the
+same per-axis guard as [`assemble`](@ref). `mat` must have been
+produced by a matching `assemble` so its `colptr`/`rowval` align with
+the kernel's sweep.
 """
 function update!(
     mat::SparseMatrixCSC{T, Int},
-    st::StarStencil{L, T, N, M},
+    st::StarStencil{L, T, N, M, C, ColumnAccess},
     row::NTuple{N, AbstractUnitRange{Int}},
     col::NTuple{N, AbstractUnitRange{Int}},
-) where {L, T, N, M}
+) where {L, T, N, M, C}
     for d in 1:N
         2L <= length(row[d]) || throw(ArgumentError(
             "stencil reach 2L=$(2L) exceeds length(row[$d])=$(length(row[d])); " *
             "this would force the saturated-middle phase in the per-axis " *
             "three-phase kernel, which is out of scope"))
     end
-    _fill_nd_star!(mat.nzval, Val(L), st.coefs, row, col, Val(N),
+    _fill_nd_star!(mat.nzval, Val(L), st.terms, row, col, Val(N),
                    1, 0, 0, (), ())
     return mat
 end
@@ -339,23 +372,25 @@ end
 end
 
 """
-    _fill_nd_star!(nzval, ::Val{L}, coefs, row, col, ::Val{Nd},
+    _fill_nd_star!(nzval, ::Val{L}, terms, row, col, ::Val{Nd},
                    nzval_idx, n_outer_invalid, invalid_outer_d,
                    axis_state, outer_coords) -> nzval_idx
 
 Recursive N-D star fill kernel. Mirrors [`_pattern_nd_star!`](@ref) but
 writes only `nzval` (`colptr`/`rowval` were finalised by `assemble`).
 Threads `outer_coords` (mesh positions of peeled dims, ordered to match
-coef array axes) so coef indexing at the base is
-`coefs[d][k][c_1, outer_coords...]`. The center slot writes
-`Σ_d coefs[d][L + 1][c_1, outer_coords...]` (diagonal merge).
+coef array axes). At the base, the full-star branch fetches each axis's
+per-column `SVector` once (`svs = ntuple(d -> terms[d][c_1,
+outer_coords...], N)`) and reads slot `k` from it; the center slot writes
+`Σ_d svs[d][L + 1]` (diagonal merge). The single-axis branches fetch only
+the one axis vector they emit from.
 """
 function _fill_nd_star! end
 
 @inline function _fill_nd_star!(
     nzval::AbstractVector{T},
     ::Val{L},
-    coefs::NTuple{N, NTuple{M, AbstractArray{T, N}}},
+    terms::NTuple{N, AbstractArray{SVector{M, T}, N}},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
     ::Val{1},
@@ -374,51 +409,49 @@ function _fill_nd_star! end
         δ_lo_1 = max(-L, c_1 - rmax)
 
         if n_outer_invalid == 0 && c_1_valid
+            # Full star — fetch each axis's coefficient vector once.
+            svs = ntuple(d -> terms[d][c_1, outer_coords...], Val(N))
             for i in N_outer:-1:1
                 d = i + 1
                 _, δ_lo_d, δ_hi_d = axis_state[i]
                 for δ in δ_hi_d:-1:max(1, δ_lo_d)
-                    k = δ + L + 1
-                    nzval[nzval_idx] = coefs[d][k][c_1, outer_coords...]
+                    nzval[nzval_idx] = svs[d][δ + L + 1]
                     nzval_idx += 1
                 end
             end
             for δ in δ_hi_1:-1:max(1, δ_lo_1)
-                k = δ + L + 1
-                nzval[nzval_idx] = coefs[1][k][c_1, outer_coords...]
+                nzval[nzval_idx] = svs[1][δ + L + 1]
                 nzval_idx += 1
             end
             center_val = zero(T)
             for d in 1:N
-                center_val += coefs[d][L + 1][c_1, outer_coords...]
+                center_val += svs[d][L + 1]
             end
             nzval[nzval_idx] = center_val
             nzval_idx += 1
             for δ in min(-1, δ_hi_1):-1:δ_lo_1
-                k = δ + L + 1
-                nzval[nzval_idx] = coefs[1][k][c_1, outer_coords...]
+                nzval[nzval_idx] = svs[1][δ + L + 1]
                 nzval_idx += 1
             end
             for i in 1:N_outer
                 d = i + 1
                 _, δ_lo_d, δ_hi_d = axis_state[i]
                 for δ in min(-1, δ_hi_d):-1:δ_lo_d
-                    k = δ + L + 1
-                    nzval[nzval_idx] = coefs[d][k][c_1, outer_coords...]
+                    nzval[nzval_idx] = svs[d][δ + L + 1]
                     nzval_idx += 1
                 end
             end
         elseif n_outer_invalid == 0 && !c_1_valid
+            sv1 = terms[1][c_1, outer_coords...]
             for δ in δ_hi_1:-1:δ_lo_1
-                k = δ + L + 1
-                nzval[nzval_idx] = coefs[1][k][c_1, outer_coords...]
+                nzval[nzval_idx] = sv1[δ + L + 1]
                 nzval_idx += 1
             end
         elseif n_outer_invalid == 1 && c_1_valid
             _, δ_lo_d, δ_hi_d = axis_state[invalid_outer_d - 1]
+            svd = terms[invalid_outer_d][c_1, outer_coords...]
             for δ in δ_hi_d:-1:δ_lo_d
-                k = δ + L + 1
-                nzval[nzval_idx] = coefs[invalid_outer_d][k][c_1, outer_coords...]
+                nzval[nzval_idx] = svd[δ + L + 1]
                 nzval_idx += 1
             end
         end
@@ -429,7 +462,7 @@ end
 @inline function _fill_nd_star!(
     nzval::AbstractVector{T},
     ::Val{L},
-    coefs::NTuple{N, NTuple{M, AbstractArray{T, N}}},
+    terms::NTuple{N, AbstractArray{SVector{M, T}, N}},
     row::NTuple{Nd, AbstractUnitRange{Int}},
     col::NTuple{Nd, AbstractUnitRange{Int}},
     ::Val{Nd},
@@ -456,7 +489,7 @@ end
 
         if c_Nd_valid
             nzval_idx = _fill_nd_star!(
-                nzval, Val(L), coefs, row_rest, col_rest, Val(Nd - 1),
+                nzval, Val(L), terms, row_rest, col_rest, Val(Nd - 1),
                 nzval_idx, n_outer_invalid, invalid_outer_d,
                 new_axis_state, new_outer_coords,
             )
@@ -464,7 +497,7 @@ end
             new_n_outer_invalid = n_outer_invalid + 1
             if new_n_outer_invalid < 2
                 nzval_idx = _fill_nd_star!(
-                    nzval, Val(L), coefs, row_rest, col_rest, Val(Nd - 1),
+                    nzval, Val(L), terms, row_rest, col_rest, Val(Nd - 1),
                     nzval_idx, new_n_outer_invalid, Nd,
                     new_axis_state, new_outer_coords,
                 )
