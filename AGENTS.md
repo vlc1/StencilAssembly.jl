@@ -1,119 +1,103 @@
 # AGENTS.md
 
-Canonical record of design decisions. See [`README.md`](README.md) for
-quickstart, [`docs/plan.md`](docs/plan.md) for status, and
-[`docs/star.md`](docs/star.md) / [`docs/term.md`](docs/term.md) for
-per-feature plans.
+CSC **assembly** invariants for the stencil types. The stencil/term *type
+vocabulary* (`AccessStyle`, `AbstractStencil`, `AbstractTerm`,
+`StaticPair`/`StaticShift`, `LinearStencil`, `StarStencil`, `Stencil`,
+`as_linear`/`as_star`) is owned by **StencilCore** —
+see [`../StencilCore/AGENTS.md`](../StencilCore/AGENTS.md). The symbolic CAS
+that feeds these stencils is [`docs/cas.md`](docs/cas.md). Status:
+[`docs/plan.md`](docs/plan.md); per-feature: [`docs/star.md`](docs/star.md).
+
+This package depends on StencilCore (via a `[sources]` path until it is
+registered), re-exports the stencil names, and adds `assemble` / `update!` /
+`build`.
 
 ## Sticky decisions
 
-1. **Type-driven API.**
-   `LinearStencil{D, O, L, T, N, A<:AbstractArray{SVector{L, T}, N}, S<:AccessStyle} <: AbstractStencil{S}`
-   carries `offsets::SUnitRange{O, L}` (`StaticArrays.jl`) and a single
-   coefficient array `term::A`. Each element `term[c]` is the
-   `SVector{L, T}` of the column's per-offset coefficients in ascending
-   offset order (`term[c][1]` ↦ offset `O`) — an array-of-structs, not
-   one array per offset. `T` is the scalar eltype; the `SVector` length
-   is tied to the offset count `L` at the type level.
-   `D` ∈ `[1, N]`; `O = δ_min`, `L = δ_max − δ_min + 1`. Offsets are
-   **diagonal indices**: for column `j`, row `i`, the diagonal is
-   `k = j − i`.
-   `StarStencil{L, T, N, M, C<:NTuple{N, AbstractArray{SVector{M, T}, N}}, S} <: AbstractStencil{S}`
-   is the star-shaped analog with `M = 2L + 1` per-axis offsets in
-   `−L:L`; `terms[d]` is one `AbstractArray{SVector{M, T}, N}` per axis.
-
-2. **Constructor.** Inner ctors check `D ≥ 1`, `D ≤ N` (LinearStencil)
-   and `L ≥ 1`, `M = 2L + 1` (StarStencil); `SUnitRange` enforces
-   unit-ascending offsets at the type, and the `SVector` element length
-   (`= L`, resp. `M`) is bound at the type — a mismatch fails dispatch.
-   Friendly outer ctors raise `ArgumentError` on ill-typed inputs
-   (non-array `term`, non-`SVector` eltype, `SVector` length ≠ `L`/`M`).
-
-3. **Public ops.** `assemble` (sparsity only, uninit `nzval`);
-   `update!` (writes `nzval` in place, allocation-free modulo the single
-   `term[c]` `getindex` per active column — `SVector{L}` is isbits,
+1. **Public ops.** `assemble` (sparsity only — `colptr`/`rowval`, uninit
+   `nzval`); `update!` (writes `nzval` in place, allocation-free modulo the
+   single `term[c]` `getindex` per active column — `SVector{L}` is isbits,
    returned by value); `build = update!(assemble(...), ...)`.
-   1-D `LinearStencil` `assemble` / `update!` pin `D = 1`, `N = 1`
-   (misuse → `MethodError`) and enforce
+
+2. **Dispatch gate.** Assembly methods require a **concrete-array**
+   coefficient (`A<:AbstractArray{SVector{L,T},N}`) and `S = ColumnAccess`.
+   A symbolic (`AbstractTerm`) coefficient or a `RowAccess` stencil matches
+   no method → `MethodError` (materialize first / CSR is reserved). The
+   scalar `T` is recovered as `eltype(E)`; the grid rank `N` is bound by
+   unifying `A`'s `ndims` with `row::NTuple{N}`.
+
+3. **Guards.** 1-D `LinearStencil` `assemble` / `update!` pin `D = 1`,
+   `N = 1` (misuse → `MethodError`) and enforce
    **`L − 1 ≤ length(row[1])`** — the three-phase kernel's exact
-   correctness boundary. N-D analogs carry the same per-stencil-dim
-   guard; `StarStencil` requires `2L ≤ length(row[d])` for every `d`.
+   correctness boundary. N-D `LinearStencil` carries the same guard on
+   `row[D]`; `StarStencil` requires **`2L ≤ length(row[d])` for every `d`**
+   (also what makes the interlaced reverse-lex order coincide with CSC row
+   order — see decision 6).
 
-4. **Row / col.** `NTuple{N, AbstractUnitRange{Int}}` on a single
-   shared integer mesh — rectangular sub-blocks that may be unequal
-   or shifted. Compact row index for mesh `r` is
-   `r − first(row[d]) + 1` per dim. Column `c` × offset `δ` lands on
-   row `c − δ`; out-of-range rows dropped, off-`col` columns never
-   visited.
+4. **Row / col.** `NTuple{N, AbstractUnitRange{Int}}` on a single shared
+   integer mesh — rectangular sub-blocks, possibly unequal or shifted.
+   Compact row index for mesh `r` is `r − first(row[d]) + 1` per dim.
+   Column `c` × offset `δ` lands on row `c − δ`; out-of-range rows dropped,
+   off-`col` columns never visited. Under `ColumnAccess`, `term[c_idx]` is
+   read at the **column** mesh position; the coef array's axes must cover
+   `col` (wrap shifted/non-square operators with `OffsetArray` or build in
+   mesh-space). The whole `SVector` for a column is fetched in one
+   `getindex`, so a lazy coef array can precompute per-column work.
 
-5. **Terms anchor.** Under `S = ColumnAccess`,
-   `term[c_idx][k]` is the coefficient at column `c_idx` for offset
-   `δ = k − 1 + O` (`StarStencil`: `terms[d][c_idx][k]`, `δ = k − L − 1`).
-   The coef array's axes must cover `col`. For shifted / non-square
-   operators, wrap with `OffsetArray` or build in mesh-space. The whole
-   `SVector` for a column is fetched in one `getindex`, so a lazy coef
-   array can precompute work shared across a column's offsets.
-
-6. **Three-phase kernel.** Trim `δ_lo = max(O, cmin − rmax)`,
-   `δ_hi = min(O + L − 1, cmax − rmin)`; empty early if
-   `δ_lo > δ_hi`. Otherwise tile `[cmin, cmax]` with: left ramp
+5. **Three-phase 1-D `LinearStencil` kernel** (`_pattern!` / `_fill!`).
+   Trim `δ_lo = max(O, cmin − rmax)`, `δ_hi = min(O+L−1, cmax − rmin)`;
+   empty early if `δ_lo > δ_hi`. Otherwise tile `[cmin, cmax]`: left ramp
    (active grows to `Leff = δ_hi − δ_lo + 1`), interior (closed-form
-   `cur(c) = cur_int_0 + Leff * (c − c_LR)`), right ramp (active
-   shrinks). Each phase walks `δ` high → low so rows ascend per
-   column (CSC sortedness without sort); `δ → k = δ − O + 1` indexes
-   the column's `SVector` (`sv = term[c]`; `sv[k]`). Ramps use
-   `max(0, active)` for off-mesh tails. Under the
-   guard, interior empties at `L = length(row) + 1`; the
-   saturated-middle phase is out of scope. See `?_pattern!`.
+   `cur(c) = cur_int_0 + Leff·(c − c_LR)`), right ramp (active shrinks).
+   Each phase walks `δ` high → low so rows ascend per column (CSC
+   sortedness without sort); `δ → k = δ − O + 1` indexes the column's
+   `SVector`. Ramps use `max(0, active)` for off-mesh tails. Under the
+   guard, interior empties at `L = length(row)+1`; the saturated-middle
+   phase is out of scope.
 
-7. **N-D dispatch.** State-threading recursion peels dimensions
-   outermost (last) → innermost (first) via `Base.front` / `last`,
-   dispatches on `Val{D}` × `Val{Nd}`, and **returns** updated state
-   (`(cur, col_j)` / `nzval_idx`) so each output column is visited
-   once. The three-phase trim runs at the stencil-dim peel
-   (`Nd == D`), threading `(active_c, r_start_c)` to the inner base,
-   which emits an arithmetic sequence of step
-   `s_D = prod(length(row[d]) for d in 1:D-1)`. Non-D peels
-   accumulate `row_base`; fill threads `outer_coords::NTuple` for
-   dimension-agnostic `term[c_1, outer_coords...][k]` indexing.
-   `StarStencil` kernels (`_pattern_nd_star!`, `_fill_nd_star!`)
-   follow the same peel structure with three-way per-column
-   branching and a single merged CSC entry on the diagonal; the
-   full-star fill fetches each axis's column `SVector` once
-   (`svs = ntuple(d -> terms[d][c_1, …], N)`) and reuses it across that
-   axis's offsets and the merged center sum `Σ_d svs[d][L + 1]`.
+6. **N-D dispatch.** State-threading recursion peels dimensions outermost
+   (last) → innermost (first) via `Base.front` / `last`, dispatches on
+   `Val{D}` × `Val{Nd}`, and **returns** updated state so each output column
+   is visited once. The three-phase trim runs at the stencil-dim peel
+   (`Nd == D`), threading `(active_c, r_start_c)` to the inner base, which
+   emits an arithmetic sequence of step `s_D = prod(length(row[d]) for d in
+   1:D−1)`; descending `δ` ⇒ ascending row. Non-D peels accumulate
+   `row_base`; fill threads `outer_coords::NTuple` for dimension-agnostic
+   `term[c_1, outer_coords...][k]` indexing.
 
-8. **Access style.** `AccessStyle` is a Holy trait carried as the
-   **last** stencil type parameter; `AbstractStencil{S<:AccessStyle}`
-   defines the accessor once. `ColumnAccess` (CSC) and `RowAccess`
-   (reserved for CSR) are the singletons. Trait is inert at
-   element-access time; assemblers dispatch on it. Construction uses
-   a positional `Type` tag with `ColumnAccess` as default:
-   `LinearStencil{D}(offsets, term)` ≡
-   `LinearStencil{D}(ColumnAccess, offsets, term)`;
-   `LinearStencil{D}(RowAccess, offsets, term)` is explicit. Same
-   for `StarStencil{L}(…)`. CSC `assemble` / `update!` dispatch
-   requires `S = ColumnAccess`; `RowAccess` → `MethodError` until a
-   CSR assembler is added.
+7. **Interlaced `StarStencil` kernel** (`_pattern_nd_star!` /
+   `_fill_nd_star!`). Per output column (column-major via
+   `CartesianIndices(col)`) walk the `M = 2NL+1` canonical offsets in
+   CSC-ascending-row order — upper block `d = N…1, o = L…1`, the explicit
+   **diagonal slot**, lower block `d = 1…N, o = 1…L` — skipping off-mesh
+   slots; row `= base − o·s_d`. Under the `2L ≤ length(row[d])` guard the
+   reverse-lex storage order is strictly monotonic in row, so emission is
+   sort-free. The **diagonal is a single slot** `term[c][NL+1]` (no
+   per-axis merge). A column with one axis outside `row` emits only that
+   axis's slots; with two or more, nothing. The 1-D star delegates to
+   `LinearStencil{1}` via `_as_linear` (layouts coincide); `update!` is
+   allocation-free.
 
 ## Public surface
 
-Exports: `LinearStencil`, `StarStencil`, `assemble`, `update!`,
-`build`, `AbstractStencil`, `AccessStyle`, `ColumnAccess`,
-`RowAccess`.
+Re-exports from StencilCore: `AccessStyle`, `ColumnAccess`, `RowAccess`,
+`AbstractStencil`, `LinearStencil`, `StarStencil`, `Stencil`, `as_linear`,
+`as_star`. Adds: `assemble`, `update!`, `build`.
 
-Kernels (internal): `_pattern!` / `_fill!` (1-D LinearStencil fast
-path), `_pattern_nd!` / `_fill_nd!` (N-D LinearStencil),
-`_pattern_nd_star!` / `_fill_nd_star!` (N-D StarStencil).
+Kernels (internal): `_pattern!` / `_fill!` (1-D LinearStencil),
+`_pattern_nd!` / `_fill_nd!` (N-D LinearStencil),
+`_pattern_nd_star!` / `_fill_nd_star!` (interlaced N-D StarStencil),
+`_as_linear` (1-D star → LinearStencil).
 
 Tests: `julia --project=. -e 'using Pkg; Pkg.test()'`.
 
 ## Scope
 
-Implemented: `LinearStencil` (any `1 ≤ D ≤ N`) and `StarStencil`
-(any `N ≥ 1`, `L ≥ 1`) under `S = ColumnAccess`; full CSC pipeline
-with the per-dim guards above. `RowAccess` constructs but is
-unassemblable on CSC by design.
+Implemented: CSC assembly for `LinearStencil` (any `1 ≤ D ≤ N`) and the
+interlaced `StarStencil` (any `N ≥ 1`, `L ≥ 1`) under `S = ColumnAccess`,
+with the per-dim guards above. Symbolic-coefficient and `RowAccess`
+stencils construct but are unassemblable here by design.
 
-Deferred: CSR assembly (`RowAccess` activation), composition,
-`BandedMatrix` and dense matrix targets.
+Deferred: CSR assembly (`RowAccess`); a direct kernel for the general
+`Stencil` (narrowed to Linear/Star for now); `BandedMatrix` / dense targets;
+stencil composition.
