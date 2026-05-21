@@ -48,8 +48,13 @@ Where a mature ecosystem alternative exists it is named explicitly (see
    `SVector{2,Number}`. A `promote_op` of `Union{}` (e.g. genuine
    `SVector` component inhomogeneity) raises an `ArgumentError` **at the
    build site**. `eltype(::AbstractTerm{T}) = T` is then trivial.
-3. **Constants are wrapped.** `Const{T} <: AbstractTerm{T}`, value as a
-   runtime field. Scalars auto-wrap via `convert(AbstractTerm, x) = Const(x)`.
+3. **Three leaf kinds.** `Slot{S,T}` (per-cell array), `Scalar{S,T}`
+   (named broadcast parameter, un-indexed), and `Const{T}` (literal,
+   runtime field) — all `<: AbstractTerm{T}`. Literals auto-wrap via
+   `convert(AbstractTerm, x) = Const(x)`. `Slot`/`Scalar` default `T` to
+   `Number`. `Scalar`'s substitution contract is advisory (`T` for
+   eltype inference only); `differentiate` treats `Scalar`/`Const` as
+   constants.
 4. **Shifts are type-level (`StaticShift`).** Offsets enter only through
    the DSL functors (`FwdDiff{D}`, …) whose `D` is a type parameter — so
    they are compile-time known, on the same footing as `LinearStencil`'s
@@ -72,16 +77,17 @@ Where a mature ecosystem alternative exists it is named explicitly (see
 9. **Differentiation is row-anchored.** The Jacobian coefficient at
    offset `δ` is `∂F/∂(shifted arg)` evaluated at the **row** index — no
    shifts injected. `differentiate` emits `Stencil{RowAccess}`.
-10. **Output is a `StencilCore.Stencil{S<:AccessStyle}`** (the general
-    offset-list stencil), not a bespoke `SymbolicStencil`. The bridge
-    converts `RowAccess → ColumnAccess` by the exact per-offset shift
-    `term_col(δ) = Shifted((D ⇒ −δ), g_δ)`, then **narrows** to
+10. **Output is a `StencilCore.Stencil{M, …}`** (the general
+    reverse-lex offset-list stencil), not a bespoke `SymbolicStencil`.
+    The bridge converts `RowAccess → ColumnAccess` by the exact per-offset
+    shift `term_col(δ) = Shifted((D ⇒ −δ), g_δ)`, then **narrows** to
     `LinearStencil` / `StarStencil` for CSC assembly.
-11. **Coefficient is one combined `SVector`-valued term.** Over offsets
-    `O … O+L−1`, the single term `SVector(c_O, …, c_{O+L−1})` (with
-    `Const(0)` padding). By decision 1 its eltype is `SVector{L,scalar}`,
-    so it is an `ArrayOrTermLike{SVector{L,scalar}}` and *is* the
-    coefficient field of a (symbolic) `LinearStencil`.
+11. **Coefficient is one `SVector{M}`-valued term in reverse-lex order.**
+    The `M` offsets are an `NTuple{M, SShift}` sorted reverse-lex (the
+    `StencilCore` canonical layout shared by `Stencil` / `StarStencil` /
+    `LinearStencil`); the term is `SVector(c_1, …, c_M)` (with `Const(0)`
+    padding for absent offsets), eltype `SVector{M,scalar}` by decision 1.
+    Because the layout matches, narrowing copies the term **verbatim**.
 12. **`materialize` lowers to compiled code (codegen).** Build a Julia
     `Expr` per term; execute via
     [`RuntimeGeneratedFunctions.jl`](https://github.com/SciML/RuntimeGeneratedFunctions.jl).
@@ -98,12 +104,18 @@ Where a mature ecosystem alternative exists it is named explicitly (see
 subtypes here:
 
 ```julia
-struct Slot{S, T}                 <: AbstractTerm{T} end
+struct Slot{S, T}                 <: AbstractTerm{T} end   # per-cell array placeholder
 Slot{S}() where {S} = Slot{S, Number}()                 # T defaults to Number
 
-struct Const{T}                   <: AbstractTerm{T}
+struct Scalar{S, T}               <: AbstractTerm{T} end   # named broadcast parameter
+Scalar{S}() where {S} = Scalar{S, Number}()             # T defaults to Number
+
+struct Const{T}                   <: AbstractTerm{T}      # general runtime value
     value::T
 end
+
+struct Zero{T}                    <: AbstractTerm{T} end   # type-level additive identity
+struct One{T}                     <: AbstractTerm{T} end   # type-level multiplicative identity
 
 struct Term{F, A<:Tuple{Vararg{AbstractTerm}}, T} <: AbstractTerm{T}
     fn::F
@@ -138,6 +150,42 @@ Notes:
 - Abstract `T` (`Real`, `Number`) is first-class and propagates; a
   non-concrete materialized eltype is correct but slow (opt-in
   concreteness check at `materialize`).
+- **`Scalar{S,T}`** is a named, runtime-substituted *broadcast* parameter
+  (e.g. a timestep `τ = Scalar{:τ, Real}()`, or an anisotropic viscosity
+  `μ = Scalar{:μ, SMatrix{2,2,Real}}()`). Unlike `Slot`, it lowers to an
+  **un-indexed** value at codegen (`args.τ`, not `args.τ[i,j]`); unlike
+  `Const`, its value arrives at `materialize` via the substitution
+  `NamedTuple`. Its `T` serves **eltype inference only** — the
+  substitution is *advisory* (no `typeof(value) <: T` check), so an
+  invariant parametric `T` like `SMatrix{2,2,Real}` accepts a concrete
+  `SMatrix{2,2,Float64}` value without tripping invariance. In
+  `differentiate`, `Scalar` is constant (∂ = 0), like `Const`.
+- **`Zero{T}` / `One{T}`** are type-level encodings of the algebraic
+  identities. They exist because of the guiding principle below; they
+  carry their eltype as `T` and lower to `zero(T)` / `one(T)` at codegen.
+
+### Representation principle: structure at the type level, data in fields
+
+Type parameters encode **structure** — what drives dispatch, narrowing,
+and codegen; runtime fields hold **data** — values computed or substituted
+later. Thus shifts (`StaticShift`) are type-level (they fix the offset
+pattern and index arithmetic), while general coefficients live in
+`Const`'s field (arbitrary, possibly non-`isbits`, would explode types if
+lifted — cf. decision 2). The *only* values promoted to the type level are
+the additive/multiplicative identities `0`/`1` (`Zero`/`One`), because
+they **are** structure: they are the neutral/annihilating elements that
+let differentiation collapse and `simplify` rewrite **by dispatch**
+(`Term(+,(a,::Zero))→a`, `Term(*,(_,::Zero))→Zero`, `Term(*,(a,::One))→a`)
+without runtime `iszero`/`isone` probing.
+
+**Pre-simplified-input assumption.** A user-written `0 * f[]` parses to
+`Term(*, (Const(0), f))` — *not* a `Zero`. We do **not** auto-recognize
+such spurious non-zeros (the case list is endless); the user is assumed
+to supply reasonably simplified expressions. `Zero`/`One` arise only from
+`differentiate` and internal constant folding, never from promoting a
+user `Const`. (Compiler constant-propagation is a *separate* layer — it
+optimizes the generated runtime code and cannot do symbolic
+simplification, e.g. it won't fold `0*x` for floats.)
 
 ## Static shifts (`StaticPair` / `StaticShift`)
 
@@ -169,6 +217,7 @@ Base.:*(k::Integer, a::SShift)    = SShift(map(p -> k*p, a.pairs))  # k=0 ⇒ al
 fold, generalised). Display sugar (MAX_DIM = 9, display-only):
 
 ```julia
+const ô  = SShift{Tuple{}}()                        # zero shift (identity)
 const ê₁ = SShift((SPair{1,1}(),)); … ; const ê₉ = SShift((SPair{9,1}(),))
 # show(SShift{Tuple{SPair{1,3},SPair{2,1}}}) prints "3ê₁ + ê₂"; same form constructs it.
 ```
@@ -189,6 +238,24 @@ for op in (:-, :exp, :sin, :cos, :tan, :log, :sqrt, :abs)
     @eval Base.$op(a::AbstractTerm) = Term($op, (a,))
 end
 StaticArrays.SVector(args::AbstractTerm...) = Term(SVector, args)   # interception
+```
+
+**Indexing sugar.** `AbstractTerm` is *not* `<: AbstractArray`, so `getindex`
+on terms is free to mean "shift by a `StaticShift`" (no clash with the
+`LazyArray`'s integer `getindex`):
+
+```julia
+Base.getindex(t::Slot)                       = t                       # f[]  ≡ f
+Base.getindex(t::Slot, s::SShift)            = Shifted(t, s)           # term-first ctor
+Base.getindex(t::Shifted, s::SShift)         = Shifted(t.term, t.shift + s)
+# (a `Shifted(term, shift)` outer ctor delegates to the `(shift, term)` field order.)
+```
+
+so a stencil expression reads as
+
+```julia
+f = Slot{:f, Number}()
+g = f[-2ê₁] - 4f[-ê₁] + 3f[]    # f[i-2] - 4 f[i-1] + 3 f[i]
 ```
 
 Non-local functors build a `StaticShift` (axis-only, dimension-polymorphic):
@@ -228,8 +295,12 @@ post-walks to a fixed point (or a step budget). Default rules:
 
 1. **Shift composition** — `Shifted(s₁, Shifted(s₂, t)) → Shifted(s₁ + s₂, t)` (type-level `+`); zero shift ⇒ `t` by the `Shifted` outer ctor.
 2. **Shift pushdown** — `Shifted(s, Term(f, args)) → Term(f, map(a -> Shifted(s, a), args))`.
-3. **Shift over `Const`** — `Shifted(s, Const(v)) → Const(v)`.
-4. **Identity / annihilator** — `+0`, `*1`, `*0`, `--`, …
+3. **Shift over `Const` / `Zero` / `One`** — `Shifted(s, c) → c` (constants are position-independent).
+4. **Identity / annihilator (by dispatch on `Zero`/`One`)** —
+   `Term(+, (a, ::Zero)) → a`, `Term(*, (_, ::Zero)) → Zero{…}`,
+   `Term(*, (a, ::One)) → a`, unary `--`, … — *type-level*, no runtime
+   `iszero`/`isone`. A `Const` that happens to be `0`/`1` is **not**
+   folded (pre-simplified-input assumption).
 5. **Constant folding** — `Term(f, (Const(a), Const(b))) → Const(f(a, b))` for allow-listed `f`.
 
 Equality `==` is structural; semantic equivalence is `simplify(a) == simplify(b)`.
@@ -245,14 +316,19 @@ differentiate(t::AbstractTerm, ::Slot{S}) where {S} = _diff(simplify(t), Val(S))
 
 Algorithm (normal-form input ⇒ shifts on leaves):
 
-1. Recurse, collecting `(StaticShift, partial)` contributions:
-   - `Const` ⇒ none.
-   - `Slot{S₂}` vs `S` ⇒ `(SShift{Tuple{}}, Const(1))` iff `S₂ === S`.
-   - `Shifted(sh, Slot{S₂})` vs `S` ⇒ `(sh, Const(1))` iff `S₂ === S`.
+1. Recurse, collecting `(StaticShift, partial)` contributions. Neutral
+   elements are the type-level `Zero`/`One` (carrying eltype via
+   `promote_type`), restoring the type info a `Const(0)`/`Const(1)` would
+   lose:
+   - `Const`, `Scalar` ⇒ none (constants).
+   - `Slot{S₂}` vs `Slot{S}` ⇒ `(ô, One{promote_type(…)})` iff `S₂ === S`, else `Zero`.
+   - `Shifted(sh, Slot{S₂})` vs `S` ⇒ `(sh, One{…})` iff `S₂ === S`.
    - `Term(f, args)` ⇒ for each `i`, recurse on `argsᵢ`, multiply by
      `derivative(f, Val(i), args...)`, `simplify`.
-2. Group by offset, sum partials, drop offsets summing to `Const(0)`.
-   **No shift injected** — each `g_δ` is the row-anchored coefficient.
+2. Group by offset, sum partials, drop offsets whose sum simplifies to
+   `Zero`. **No shift injected** — each `g_δ` is the row-anchored
+   coefficient. (`One`/`Zero` make the chain-rule collapse happen by
+   dispatch, e.g. `One * partial → partial`, `Zero + x → x`.)
 3. Assemble the combined `SVector`-valued coefficient term and wrap in
    `Stencil{RowAccess}` (offsets = the collected `StaticShift`s).
 
@@ -263,21 +339,49 @@ For `out[i] = ψ[i]·(ϕ[i+1] − ϕ[i])`: `A[i,i+1]=ψ[i]` (δ=+1),
 `ColumnAccess` (needed for CSC) injects the offset:
 `term_col(δ)[c] = g_δ[c−δ] = Shifted((D ⇒ −δ), g_δ)[c]` — done in the bridge.
 
-### Derivative-rule table (excerpt)
+### AccessStyle = anchoring + emission direction (offsets invariant)
+
+`AccessStyle` is a *storage* trait, **not** transposition. The offsets
+(`δ = col − row`, reverse-lex order) and the offset list are **invariant**
+under `S`; `S` selects only:
+1. the coefficient **anchor** — `RowAccess` stores `g_σ` (value at the
+   row); `ColumnAccess` stores `Shifted(−σ, g_σ)` (the value re-read at
+   the column). For **constant coefficients** `Shifted(−σ, g)=g`, so the
+   two are *identical*.
+2. the **emission direction** — CSC (`ColumnAccess`) walks offsets
+   descending (rows ascend per column); CSR (`RowAccess`) ascending.
+
+So for `g = f[-2ê₁] - 4f[-ê₁] + 3f[]` (constant coefs), the `RowAccess`
+and `ColumnAccess` stencils coincide:
 
 ```julia
-derivative(::typeof(+), ::Val{i}, xs...) where {i} = Const(1)
-derivative(::typeof(-), ::Val{1}, x)               = Const(-1)
-derivative(::typeof(-), ::Val{1}, x, y)            = Const(1)
+Stencil{RowAccess   }((-2ê₁, -ê₁, ô), Term(SVector, (Const(1), Const(-4), Const(3))))
+Stencil{ColumnAccess}((-2ê₁, -ê₁, ô), Term(SVector, (Const(1), Const(-4), Const(3))))
+```
+
+They diverge only when a coefficient is position-dependent (involves
+another `Slot`), where `ColumnAccess` shifts it by `−σ`. The adjoint
+(`Aᵀ`, which *would* negate offsets) is a separate, explicit operation,
+deliberately **not** conflated with `AccessStyle`.
+
+### Derivative-rule table (excerpt)
+
+Identities use the type-level `Zero`/`One`; other constants use `Const`
+(eltype `T` derived from the args via `promote_type`):
+
+```julia
+derivative(::typeof(+), ::Val{i}, xs...) where {i} = One{…}()
+derivative(::typeof(-), ::Val{1}, x)               = Const(-1)            # unary negate
+derivative(::typeof(-), ::Val{1}, x, y)            = One{…}()
 derivative(::typeof(-), ::Val{2}, x, y)            = Const(-1)
 derivative(::typeof(*), ::Val{1}, x, y)            = y
 derivative(::typeof(*), ::Val{2}, x, y)            = x
-derivative(::typeof(/), ::Val{1}, x, y)            = Term(/, (Const(1), y))
-derivative(::typeof(^), ::Val{1}, x, n)            = Term(*, (n, Term(^, (x, Term(-, (n, Const(1)))))))
+derivative(::typeof(/), ::Val{1}, x, y)            = Term(/, (One{…}(), y))
+derivative(::typeof(^), ::Val{1}, x, n)            = Term(*, (n, Term(^, (x, Term(-, (n, One{…}()))))))
 derivative(::typeof(sin), ::Val{1}, x)             = Term(cos, (x,))
 derivative(::typeof(cos), ::Val{1}, x)             = Term(-, (Term(sin, (x,)),))
 derivative(::typeof(exp), ::Val{1}, x)             = Term(exp, (x,))
-derivative(::typeof(log), ::Val{1}, x)             = Term(/, (Const(1), x))
+derivative(::typeof(log), ::Val{1}, x)             = Term(/, (One{…}(), x))
 # Users extend: GridAlgebra.derivative(::typeof(my_fn), ::Val{1}, x) = ...
 ```
 
@@ -304,6 +408,7 @@ end
    check `eltype(pairs[S]) <: T` per slot.
 2. **Build the `Expr`** over index vars `(i₁,…,i_N)`:
    - `Slot{S}` ⇒ `:(args.$S[$(idxvars...)])`.
+   - `Scalar{S}` ⇒ `:(args.$S)` (un-indexed broadcast value).
    - `Shifted(sh, Slot{S})` ⇒ index arithmetic from `sh`'s `StaticPair{D,O}`
      parameters (read off the type), expanded to `N` (zeros elsewhere).
    - `Const(v)` ⇒ the literal; `Term(f, args)` ⇒ `:( $f($(rendered...)) )`.
@@ -399,7 +504,7 @@ A = build(st, (1:15,), (1:15,))
 
 ```julia
 # Concrete term types (subtypes of StencilCore.AbstractTerm)
-Slot, Const, Term, Shifted
+Slot, Scalar, Const, Zero, One, Term, Shifted
 
 # Operators (+ Unicode aliases δ₊ δ₋ σ₊ σ₋); basis-shift symbols ê₁ … ê₉
 FwdDiff, BwdDiff, FwdSum, BwdSum
