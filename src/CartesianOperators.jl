@@ -14,7 +14,10 @@ export AccessStyle,
        RowAccess,
        AbstractStencil,
        LinearStencil,
-       StarStencil
+       StarStencil,
+       Stencil,
+       as_linear,
+       as_star
 
 # CartesianOperators' own assembly verbs.
 export assemble,
