@@ -355,8 +355,8 @@ So for `g = f[-2ê₁] - 4f[-ê₁] + 3f[]` (constant coefs), the `RowAccess`
 and `ColumnAccess` stencils coincide:
 
 ```julia
-Stencil{RowAccess   }((-2ê₁, -ê₁, ô), Term(SVector, (Const(1), Const(-4), Const(3))))
-Stencil{ColumnAccess}((-2ê₁, -ê₁, ô), Term(SVector, (Const(1), Const(-4), Const(3))))
+Stencil(RowAccess,    (-2ê₁, -ê₁, ô), Term(SVector, (Const(1), Const(-4), Const(3))))
+Stencil(ColumnAccess, (-2ê₁, -ê₁, ô), Term(SVector, (Const(1), Const(-4), Const(3))))
 ```
 
 They diverge only when a coefficient is position-dependent (involves
@@ -440,7 +440,7 @@ what you read.
 
 ## The bridge (`GridAlgebraCartesianOperatorsExt`)
 
-`build_stencil(sst::Stencil{S}, pairs; access = ColumnAccess)`:
+`build_stencil(sst::Stencil, pairs; access = ColumnAccess)` (access style `S` read via `AccessStyle(sst)`):
 
 1. If converting `RowAccess → ColumnAccess`: replace each offset `δ`'s
    coefficient `g_δ` with `Shifted((D ⇒ −δ), g_δ)`; re-`simplify`.
