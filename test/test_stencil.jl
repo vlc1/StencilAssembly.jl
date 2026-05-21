@@ -351,60 +351,72 @@ end
 
 @testset "StarStencil constructor" begin
     # L invalid
-    @test_throws ArgumentError StarStencil{0}((Fill(SVector(1.0, 1.0, 1.0), 5),))
-    @test_throws ArgumentError StarStencil{-1}((Fill(SVector(1.0, 1.0, 1.0), 5),))
-    @test_throws ArgumentError StarStencil{1.0}((Fill(SVector(1.0, 1.0, 1.0), 5),))
-    # M ≠ 2L+1 (wrong SVector length)
-    @test_throws ArgumentError StarStencil{1}((Fill(SVector(1.0, 1.0), 5),))                  # M=2
-    @test_throws ArgumentError StarStencil{1}((Fill(SVector(1.0, 1.0, 1.0, 1.0), 5),))        # M=4
-    # Non-tuple terms
-    @test_throws ArgumentError StarStencil{1}(Fill(SVector(1.0, 1.0, 1.0), 5))
-    # Outer-constructor friendly errors
-    @test_throws ArgumentError StarStencil{1}(((1.0, 2.0, 3.0),))                             # per-axis not an array
-    @test_throws ArgumentError StarStencil{1}(([1.0, 2.0, 3.0],))                             # eltype not SVector
-    @test_throws ArgumentError StarStencil{1}((Fill(SVector(1.0, 1.0, 1.0), 5),               # mixed scalar eltype
-                                              Fill(SVector(1f0, 1f0, 1f0), 5)))
-    @test_throws ArgumentError StarStencil{1}((Fill(SVector(1.0, 1.0, 1.0), 5),               # ndims ≠ N (1-D arrays, N=2)
-                                              Fill(SVector(1.0, 1.0, 1.0), 5)))
-    # Happy path: store stays as given
-    st = StarStencil{1}((Fill(SVector(-1.0, 2.0, -1.0), 5),))
-    @test st.terms[1][1] == SVector(-1.0, 2.0, -1.0)
+    @test_throws ArgumentError StarStencil{0}(Fill(SVector(1.0, 1.0, 1.0), 5))
+    @test_throws ArgumentError StarStencil{-1}(Fill(SVector(1.0, 1.0, 1.0), 5))
+    @test_throws ArgumentError StarStencil{1.0}(Fill(SVector(1.0, 1.0, 1.0), 5))
+    # M not of the form 2NL+1
+    @test_throws ArgumentError StarStencil{1}(Fill(SVector(1.0, 1.0), 5))               # M=2
+    @test_throws ArgumentError StarStencil{1}(Fill(SVector(1.0, 1.0, 1.0, 1.0), 5))     # M=4
+    # ndims ≠ (M-1)/(2L): M=5 ⇒ N=2, but a 1-D array
+    @test_throws ArgumentError StarStencil{1}(Fill(SVector(1.0, 1.0, 1.0, 1.0, 1.0), 5))
+    # coefficient not an Array/Term of SVector
+    @test_throws ArgumentError StarStencil{1}([1.0, 2.0, 3.0])                          # eltype not SVector
+    @test_throws ArgumentError StarStencil{1}((1.0, 2.0, 3.0))                          # not array/term
+    # Happy path (N=1, M=3): store stays as given
+    st = StarStencil{1}(Fill(SVector(-1.0, 2.0, -1.0), 5))
+    @test st.term[1] == SVector(-1.0, 2.0, -1.0)
 end
 
 @testset "StarStencil 1-D (delegates to LinearStencil)" begin
     @testset "Laplacian shape, row=col=(1:6,)" begin
         row = (1:6,); col = (1:6,)
         n = 6
-        terms = (Fill(SVector(-1.0, 2.0, -1.0), n),)
-        st = StarStencil{1}(terms)
-        ln = LinearStencil{1}(SUnitRange(-1, 1), terms[1])
+        term = Fill(SVector(-1.0, 2.0, -1.0), n)
+        st = StarStencil{1}(term)
+        ln = LinearStencil{1}(SUnitRange(-1, 1), term)
         @test build(st, row, col) == build(ln, row, col)
     end
 
     @testset "asymmetric values, row=col=(1:5,)" begin
         # Asymmetric values to confirm the kernel doesn't assume value-symmetry.
         n = 5
-        terms = (Fill(SVector(0.3, 1.7, -2.1), n),)
-        st = StarStencil{1}(terms)
-        ln = LinearStencil{1}(SUnitRange(-1, 1), terms[1])
+        term = Fill(SVector(0.3, 1.7, -2.1), n)
+        st = StarStencil{1}(term)
+        ln = LinearStencil{1}(SUnitRange(-1, 1), term)
         @test build(st, (1:n,), (1:n,)) == build(ln, (1:n,), (1:n,))
     end
 
     @testset "L=2, asymmetric values, row=col=(1:6,)" begin
         n = 6
-        terms = (Fill(SVector(0.1, 0.2, 0.3, 0.4, 0.5), n),)
-        st = StarStencil{2}(terms)
-        ln = LinearStencil{1}(SUnitRange(-2, 2), terms[1])
+        term = Fill(SVector(0.1, 0.2, 0.3, 0.4, 0.5), n)
+        st = StarStencil{2}(term)
+        ln = LinearStencil{1}(SUnitRange(-2, 2), term)
         @test build(st, (1:n,), (1:n,)) == build(ln, (1:n,), (1:n,))
     end
 end
 
-# Decomposition oracle: a StarStencil equals the sum of N LinearStencils,
-# one per axis, with the same offsets and per-axis terms.
-function _star_decomposition_oracle(st::StarStencil{L, N, M}, row, col) where {L, N, M}
-    Σ = build(LinearStencil{1}(SUnitRange(-L, L), st.terms[1]), row, col)
+# Build the interlaced whole-star SVector{2NL+1} from per-axis offset
+# coefficients (each an SVector{2L+1} in offset order δ = -L..L). The diagonal
+# slot is the SUM of the per-axis centers, so the resulting StarStencil equals
+# the sum of the per-axis LinearStencils (the oracle below).
+function _interlace(cs::NTuple{N, SVector{Mx, T}}, ::Val{L}) where {N, Mx, T, L}
+    vals = T[]
+    for d in N:-1:1, o in -L:-1
+        push!(vals, cs[d][o + L + 1])
+    end
+    push!(vals, sum(cs[d][L + 1] for d in 1:N))
+    for d in 1:N, o in 1:L
+        push!(vals, cs[d][o + L + 1])
+    end
+    SVector{2N * L + 1, T}(vals...)
+end
+
+# Oracle: a StarStencil equals the sum of N axis-aligned LinearStencils
+# (offsets -L..L, the per-axis coefficient arrays).
+function _star_oracle(cs::NTuple{N}, ::Val{L}, row, col) where {N, L}
+    Σ = build(LinearStencil{1}(SUnitRange(-L, L), cs[1]), row, col)
     for d in 2:N
-        Σ = Σ + build(LinearStencil{d}(SUnitRange(-L, L), st.terms[d]), row, col)
+        Σ = Σ + build(LinearStencil{d}(SUnitRange(-L, L), cs[d]), row, col)
     end
     return Σ
 end
@@ -412,131 +424,119 @@ end
 @testset "StarStencil 2-D vs sum(LinearStencils)" begin
     @testset "Laplacian, row=col=(1:5,1:4)" begin
         row = (1:5, 1:4); col = (1:5, 1:4)
-        n1 = length(row[1]); n2 = length(row[2])
-        terms = (
-            Fill(SVector(-1.0, 2.0, -1.0), n1, n2),
-            Fill(SVector(-1.0, 2.0, -1.0), n1, n2),
-        )
-        st = StarStencil{1}(terms)
-        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+        n1, n2 = 5, 4
+        cx = SVector(-1.0, 2.0, -1.0); cy = SVector(-1.0, 2.0, -1.0)
+        st = StarStencil{1}(Fill(_interlace((cx, cy), Val(1)), n1, n2))
+        cs = (Fill(cx, n1, n2), Fill(cy, n1, n2))
+        @test build(st, row, col) == _star_oracle(cs, Val(1), row, col)
     end
 
     @testset "asymmetric values, row=col=(1:6,1:5)" begin
         row = (1:6, 1:5); col = (1:6, 1:5)
         n1, n2 = 6, 5
-        terms = (
-            Fill(SVector(0.1, 1.7, -2.3), n1, n2),
-            Fill(SVector(-0.5, 3.1, 0.8), n1, n2),
-        )
-        st = StarStencil{1}(terms)
-        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+        cx = SVector(0.1, 1.7, -2.3); cy = SVector(-0.5, 3.1, 0.8)
+        st = StarStencil{1}(Fill(_interlace((cx, cy), Val(1)), n1, n2))
+        cs = (Fill(cx, n1, n2), Fill(cy, n1, n2))
+        @test build(st, row, col) == _star_oracle(cs, Val(1), row, col)
     end
 
     @testset "L=2, row=col=(1:4,1:4)" begin
         row = (1:4, 1:4); col = (1:4, 1:4)
         n1, n2 = 4, 4
-        ax_terms() = Fill(SVector(0.1, 0.2, 0.3, 0.4, 0.5), n1, n2)
-        terms = (ax_terms(), ax_terms())
-        st = StarStencil{2}(terms)
-        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+        cx = SVector(0.1, 0.2, 0.3, 0.4, 0.5); cy = cx
+        st = StarStencil{2}(Fill(_interlace((cx, cy), Val(2)), n1, n2))
+        cs = (Fill(cx, n1, n2), Fill(cy, n1, n2))
+        @test build(st, row, col) == _star_oracle(cs, Val(2), row, col)
     end
 
     @testset "Float32, row=col=(1:4,1:4)" begin
         row = (1:4, 1:4); col = (1:4, 1:4)
-        terms = (
-            Fill(SVector(-1f0, 2f0, -1f0), 4, 4),
-            Fill(SVector(-1f0, 2f0, -1f0), 4, 4),
-        )
-        st = StarStencil{1}(terms)
+        cx = SVector(-1f0, 2f0, -1f0); cy = SVector(-1f0, 2f0, -1f0)
+        st = StarStencil{1}(Fill(_interlace((cx, cy), Val(1)), 4, 4))
         J = build(st, row, col)
         @test eltype(J) == Float32
-        @test J == _star_decomposition_oracle(st, row, col)
+        @test J == _star_oracle((Fill(cx, 4, 4), Fill(cy, 4, 4)), Val(1), row, col)
     end
 
-    @testset "col ⊋ row in axis 1 (exercises axis-1-only branch), row=(1:5,1:4), col=(0:6,1:4)" begin
-        row = (1:5, 1:4); col = (0:6, 1:4)
-        # Terms must cover col[1] = 0:6 — wrap with OffsetArrays-style hand-rolled axes.
-        # Easiest: use Fill with enough cells indexed by absolute mesh position via 0:6 axis.
-        # Fill is shape-based so its axes are 1-based; indexing at c=0 would fail.
-        # Simpler: shift to (1:7, 1:4) for row to keep col[1] indices valid.
-        # Re-pick ranges so col[1] still extends beyond row[1] but stays positive.
+    @testset "free diagonal (Helmholtz-style), row=col=(1:5,1:4)" begin
+        # Off-diagonals from per-axis stencils with ZERO centers; the diagonal
+        # is a free coefficient d0 — impossible in the old summed-center format.
+        row = (1:5, 1:4); col = (1:5, 1:4)
+        n1, n2 = 5, 4
+        cx = SVector(-1.0, 0.0, -1.0); cy = SVector(-1.0, 0.0, -1.0)
+        d0 = 4.7
+        # Interlaced (N=2, L=1): (axis2,-1), (axis1,-1), diagonal, (axis1,+1), (axis2,+1).
+        iv = SVector(cy[1], cx[1], d0, cx[3], cy[3])
+        st = StarStencil{1}(Fill(iv, n1, n2))
+        Σ = _star_oracle((Fill(cx, n1, n2), Fill(cy, n1, n2)), Val(1), row, col)
+        Σ += build(LinearStencil{1}(SUnitRange(0, 0), Fill(SVector(d0), n1, n2)), row, col)
+        @test build(st, row, col) == Σ
+    end
+
+    @testset "col ⊋ row in axis 1, row=(2:6,1:4), col=(1:7,1:4)" begin
         row = (2:6, 1:4); col = (1:7, 1:4)
-        n_col1, n_col2 = 7, 4
-        terms = (
-            Fill(SVector(-1.0, 2.0, -1.0), n_col1, n_col2),
-            Fill(SVector(-1.0, 2.0, -1.0), n_col1, n_col2),
-        )
-        st = StarStencil{1}(terms)
-        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+        n1, n2 = 7, 4   # term/coef arrays sized to col
+        cx = SVector(-1.0, 2.0, -1.0); cy = SVector(-1.0, 2.0, -1.0)
+        st = StarStencil{1}(Fill(_interlace((cx, cy), Val(1)), n1, n2))
+        cs = (Fill(cx, n1, n2), Fill(cy, n1, n2))
+        @test build(st, row, col) == _star_oracle(cs, Val(1), row, col)
     end
 
-    @testset "col ⊋ row in axis 2 (exercises axis-2-only branch), row=(1:5,2:4), col=(1:5,1:5)" begin
+    @testset "col ⊋ row in axis 2, row=(1:5,2:4), col=(1:5,1:5)" begin
         row = (1:5, 2:4); col = (1:5, 1:5)
-        terms = (
-            Fill(SVector(-1.0, 2.0, -1.0), 5, 5),
-            Fill(SVector(-1.0, 2.0, -1.0), 5, 5),
-        )
-        st = StarStencil{1}(terms)
-        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+        n1, n2 = 5, 5
+        cx = SVector(-1.0, 2.0, -1.0); cy = SVector(-1.0, 2.0, -1.0)
+        st = StarStencil{1}(Fill(_interlace((cx, cy), Val(1)), n1, n2))
+        cs = (Fill(cx, n1, n2), Fill(cy, n1, n2))
+        @test build(st, row, col) == _star_oracle(cs, Val(1), row, col)
     end
 end
 
 @testset "StarStencil 3-D vs sum(LinearStencils)" begin
     @testset "Laplacian, row=col=(1:3,1:3,1:3)" begin
         row = (1:3, 1:3, 1:3); col = (1:3, 1:3, 1:3)
-        terms = ntuple(_ -> Fill(SVector(-1.0, 2.0, -1.0), 3, 3, 3), 3)
-        st = StarStencil{1}(terms)
-        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+        c = SVector(-1.0, 2.0, -1.0); cs = (c, c, c)
+        st = StarStencil{1}(Fill(_interlace(cs, Val(1)), 3, 3, 3))
+        @test build(st, row, col) == _star_oracle(ntuple(_ -> Fill(c, 3, 3, 3), 3), Val(1), row, col)
     end
 
     @testset "asymmetric values, row=col=(1:3,1:3,1:3)" begin
         row = (1:3, 1:3, 1:3); col = (1:3, 1:3, 1:3)
-        terms = (
-            Fill(SVector(0.1, 1.0, -2.0), 3, 3, 3),
-            Fill(SVector(-0.5, 2.5, 0.8), 3, 3, 3),
-            Fill(SVector(0.3, -1.4, 0.6), 3, 3, 3),
-        )
-        st = StarStencil{1}(terms)
-        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+        cx = SVector(0.1, 1.0, -2.0); cy = SVector(-0.5, 2.5, 0.8); cz = SVector(0.3, -1.4, 0.6)
+        st = StarStencil{1}(Fill(_interlace((cx, cy, cz), Val(1)), 3, 3, 3))
+        cs = (Fill(cx, 3, 3, 3), Fill(cy, 3, 3, 3), Fill(cz, 3, 3, 3))
+        @test build(st, row, col) == _star_oracle(cs, Val(1), row, col)
     end
 
     @testset "unequal lengths, row=col=(1:4,1:3,1:2)" begin
         row = (1:4, 1:3, 1:2); col = (1:4, 1:3, 1:2)
-        terms = ntuple(_ -> Fill(SVector(-1.0, 2.0, -1.0), 4, 3, 2), 3)
-        st = StarStencil{1}(terms)
-        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+        c = SVector(-1.0, 2.0, -1.0)
+        st = StarStencil{1}(Fill(_interlace((c, c, c), Val(1)), 4, 3, 2))
+        @test build(st, row, col) == _star_oracle(ntuple(_ -> Fill(c, 4, 3, 2), 3), Val(1), row, col)
     end
 
     @testset "col ⊋ row in axis 3, row=(1:3,1:3,2:4), col=(1:3,1:3,1:5)" begin
         row = (1:3, 1:3, 2:4); col = (1:3, 1:3, 1:5)
-        terms = ntuple(_ -> Fill(SVector(-1.0, 2.0, -1.0), 3, 3, 5), 3)
-        st = StarStencil{1}(terms)
-        @test build(st, row, col) == _star_decomposition_oracle(st, row, col)
+        c = SVector(-1.0, 2.0, -1.0)
+        st = StarStencil{1}(Fill(_interlace((c, c, c), Val(1)), 3, 3, 5))
+        @test build(st, row, col) == _star_oracle(ntuple(_ -> Fill(c, 3, 3, 5), 3), Val(1), row, col)
     end
 end
 
 @testset "StarStencil 2L > length(row[d]) guard" begin
-    # L=2, length(row[1]) = 3 → 2L=4 > 3, rejected.
-    terms = (Fill(SVector(0.0, 0.0, 0.0, 0.0, 0.0), 3),)
-    st = StarStencil{2}(terms)
+    # 1-D, L=2, length(row[1]) = 3 → 2L=4 > 3, rejected (via the linear guard).
+    st = StarStencil{2}(Fill(SVector(0.0, 0.0, 0.0, 0.0, 0.0), 3))
     @test_throws ArgumentError build(st, (1:3,), (1:3,))
 
-    # 2-D: violated in axis 2 only.
-    terms2 = (
-        Fill(SVector(0.0, 0.0, 0.0, 0.0, 0.0), 5, 3),
-        Fill(SVector(0.0, 0.0, 0.0, 0.0, 0.0), 5, 3),
-    )
-    st2 = StarStencil{2}(terms2)
+    # 2-D, L=2 (M=2NL+1=9): violated in axis 2 only.
+    st2 = StarStencil{2}(Fill(SVector(ntuple(_ -> 0.0, 9)...), 5, 3))
     @test_throws ArgumentError build(st2, (1:5, 1:3), (1:5, 1:3))  # axis 2: 2L=4 > 3
 end
 
 @testset "StarStencil build = update!(assemble(...), ...)" begin
     row = (1:4, 1:4); col = (1:4, 1:4)
-    terms = (
-        Fill(SVector(-1.0, 2.0, -1.0), 4, 4),
-        Fill(SVector(-1.0, 2.0, -1.0), 4, 4),
-    )
-    st = StarStencil{1}(terms)
+    c = SVector(-1.0, 2.0, -1.0)
+    st = StarStencil{1}(Fill(_interlace((c, c), Val(1)), 4, 4))
     J_two_step = update!(assemble(st, row, col), st, row, col)
     J_build    = build(st, row, col)
     @test J_two_step == J_build
@@ -550,8 +550,8 @@ end
         @test st_lin isa AbstractStencil
         @test st_lin isa AbstractStencil{ColumnAccess}
 
-        terms = (Fill(SVector(-1.0, 2.0, -1.0), 5),)
-        st_star = StarStencil{1}(terms)
+        term = Fill(SVector(-1.0, 2.0, -1.0), 5)
+        st_star = StarStencil{1}(term)
         @test AccessStyle(st_star) === ColumnAccess()
         @test AccessStyle(typeof(st_star)) === ColumnAccess()
         @test st_star isa AbstractStencil
@@ -562,8 +562,8 @@ end
         st_lin = LinearStencil{1}(ColumnAccess, SUnitRange(0, 1),
                                   Fill(SVector(-1.0, 1.0), 5))
         @test AccessStyle(st_lin) === ColumnAccess()
-        terms = (Fill(SVector(-1.0, 2.0, -1.0), 5),)
-        st_star = StarStencil{1}(ColumnAccess, terms)
+        term = Fill(SVector(-1.0, 2.0, -1.0), 5)
+        st_star = StarStencil{1}(ColumnAccess, term)
         @test AccessStyle(st_star) === ColumnAccess()
     end
 
@@ -575,8 +575,8 @@ end
         @test_throws MethodError assemble(st_lin, (1:5,), (1:5,))
         @test_throws MethodError build(st_lin, (1:5,), (1:5,))
 
-        terms = (Fill(SVector(-1.0, 2.0, -1.0), 5),)
-        st_star = StarStencil{1}(RowAccess, terms)
+        term = Fill(SVector(-1.0, 2.0, -1.0), 5)
+        st_star = StarStencil{1}(RowAccess, term)
         @test AccessStyle(st_star) === RowAccess()
         @test st_star isa AbstractStencil{RowAccess}
         @test_throws MethodError assemble(st_star, (1:5,), (1:5,))
@@ -584,8 +584,8 @@ end
     end
 
     @testset "_as_linear propagates S (RowAccess)" begin
-        terms = (Fill(SVector(-1.0, 2.0, -1.0), 5),)
-        st_star = StarStencil{1}(RowAccess, terms)
+        term = Fill(SVector(-1.0, 2.0, -1.0), 5)
+        st_star = StarStencil{1}(RowAccess, term)
         ln = CartesianOperators._as_linear(st_star)
         @test ln isa LinearStencil
         @test AccessStyle(ln) === RowAccess()
@@ -593,11 +593,8 @@ end
 
     @testset "RowAccess 2-D StarStencil is unassemblable on CSC" begin
         n1, n2 = 5, 4
-        terms = (
-            Fill(SVector(-1.0, 2.0, -1.0), n1, n2),
-            Fill(SVector(-1.0, 2.0, -1.0), n1, n2),
-        )
-        st = StarStencil{1}(RowAccess, terms)
+        c = SVector(-1.0, 2.0, -1.0)
+        st = StarStencil{1}(RowAccess, Fill(_interlace((c, c), Val(1)), n1, n2))
         @test_throws MethodError assemble(st, (1:n1, 1:n2), (1:n1, 1:n2))
     end
 end
