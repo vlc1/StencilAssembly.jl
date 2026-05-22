@@ -603,23 +603,27 @@ end
 @testset "Stencil narrowing → assemble" begin
     @testset "as_linear → LinearStencil → assemble" begin
         n = 6
-        term = Fill(SVector(1.0, -4.0, 3.0), n)
-        st = Stencil(ColumnAccess, (-2ê₁, -ê₁, ô), term)
+        # SoA: one scalar coefficient per offset; narrowing interlaces them.
+        terms = (Fill(1.0, n), Fill(-4.0, n), Fill(3.0, n))
+        st = Stencil(ColumnAccess, (-2ê₁, -ê₁, ô), terms)
         ln = as_linear(st)
-        @test ln isa LinearStencil{1, -2, 3, SVector{3, Float64}, typeof(term), ColumnAccess}
-        @test ln.term === term
+        @test ln isa LinearStencil{1, -2, 3, SVector{3, Float64}, <:Any, ColumnAccess}
+        ref = fill(SVector(1.0, -4.0, 3.0), n)
+        @test ln.term == ref
         @test build(ln, (1:n,), (1:n,)) ==
-              build(LinearStencil{1}(SUnitRange(-2, 0), term), (1:n,), (1:n,))
+              build(LinearStencil{1}(SUnitRange(-2, 0), ref), (1:n,), (1:n,))
     end
 
     @testset "as_star → StarStencil → assemble" begin
         n1, n2 = 5, 4
-        term = Fill(SVector(-1.0, -1.0, 4.0, -1.0, -1.0), n1, n2)
-        st = Stencil(ColumnAccess, (-ê₂, -ê₁, ô, ê₁, ê₂), term)
+        terms = (Fill(-1.0, n1, n2), Fill(-1.0, n1, n2), Fill(4.0, n1, n2),
+                 Fill(-1.0, n1, n2), Fill(-1.0, n1, n2))
+        st = Stencil(ColumnAccess, (-ê₂, -ê₁, ô, ê₁, ê₂), terms)
         ss = as_star(st)
-        @test ss isa StarStencil{1, 2, 5, SVector{5, Float64}, typeof(term), ColumnAccess}
-        @test ss.term === term
+        @test ss isa StarStencil{1, 2, 5, SVector{5, Float64}, <:Any, ColumnAccess}
+        ref = fill(SVector(-1.0, -1.0, 4.0, -1.0, -1.0), n1, n2)
+        @test ss.term == ref
         @test build(ss, (1:n1, 1:n2), (1:n1, 1:n2)) ==
-              build(StarStencil{1}(term), (1:n1, 1:n2), (1:n1, 1:n2))
+              build(StarStencil{1}(ref), (1:n1, 1:n2), (1:n1, 1:n2))
     end
 end
