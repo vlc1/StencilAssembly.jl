@@ -1,5 +1,5 @@
-using CartesianOperators
-using CartesianOperators: _pattern!, _fill!
+using StencilAssembly
+using StencilAssembly: _pattern!, _fill!
 using StencilCore: ô, ê₁, ê₂
 using FillArrays
 using SparseArrays
@@ -587,7 +587,7 @@ end
     @testset "_as_linear propagates S (RowAccess)" begin
         term = Fill(SVector(-1.0, 2.0, -1.0), 5)
         st_star = StarStencil{1}(RowAccess, term)
-        ln = CartesianOperators._as_linear(st_star)
+        ln = StencilAssembly._as_linear(st_star)
         @test ln isa LinearStencil
         @test AccessStyle(ln) === RowAccess()
     end

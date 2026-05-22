@@ -1,12 +1,12 @@
-using CartesianOperators
+using StencilAssembly
 using SparseArrays
 using Test
 
 include("reference.jl")
 
-@testset "CartesianOperators.jl" begin
+@testset "StencilAssembly.jl" begin
     @testset "smoke" begin
-        @test isdefined(CartesianOperators, :CartesianOperators)
+        @test isdefined(StencilAssembly, :StencilAssembly)
     end
 
     @testset "reference helper" begin

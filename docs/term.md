@@ -306,7 +306,7 @@ it. No interaction with type-parameter-position ordering.
 - **New:** `src/term.jl` — `AccessStyle`, `ColumnAccess`,
   `RowAccess`, `AbstractStencil`, `AccessStyle(::AbstractStencil)`.
   ~30 lines including docstrings.
-- **Modify:** `src/CartesianOperators.jl` — `include("term.jl")`
+- **Modify:** `src/StencilAssembly.jl` — `include("term.jl")`
   before `linear.jl`. Add exports `AccessStyle`, `ColumnAccess`,
   `RowAccess`, `AbstractStencil`.
 - **Modify:** `src/linear.jl`:
@@ -342,7 +342,7 @@ it. No interaction with type-parameter-position ordering.
 
 1. **Phase 1 — `src/term.jl`.** Define `AccessStyle`,
    `ColumnAccess`, `RowAccess`, `AbstractStencil`, the trait
-   accessor. Include from `CartesianOperators.jl`; export. Module
+   accessor. Include from `StencilAssembly.jl`; export. Module
    loads cleanly.
 2. **Phase 2 — `LinearStencil` refactor.**
    - Add `S` last in the struct's type parameters; `<: AbstractStencil{S}`.
@@ -376,7 +376,7 @@ Each phase ends with `Pkg.test()` green.
 
 ## Part 4 — Verification
 
-1. `julia --project=. -e 'using CartesianOperators'` after each
+1. `julia --project=. -e 'using StencilAssembly'` after each
    phase — no `UndefVarError` / no warnings.
 2. `julia --project=. -e 'using Pkg; Pkg.test()'` — full suite green
    after Phases 2, 3, 4. Existing assertions unchanged in meaning;

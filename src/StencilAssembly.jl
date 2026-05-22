@@ -1,4 +1,4 @@
-module CartesianOperators
+module StencilAssembly
 
 using SparseArrays
 using StaticArrays: SUnitRange, SVector
@@ -19,9 +19,9 @@ export AccessStyle,
        as_linear,
        as_star
 
-# CartesianOperators' own assembly verbs.
+# StencilAssembly' own assembly verbs.
 export assemble,
        update!,
        build
 
-end # module CartesianOperators
+end # module StencilAssembly

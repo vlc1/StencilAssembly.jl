@@ -87,7 +87,7 @@ non-array elements. Re-uses the same diagnostic style.
   allocation-free apart from `coefs[d][k][...]` `getindex`.
 - `build(st::StarStencil, row, col) = update!(assemble(st, row, col), st, row, col)`.
 
-Export: add `StarStencil` to `src/CartesianOperators.jl`.
+Export: add `StarStencil` to `src/StencilAssembly.jl`.
 
 ### 1-D specialisation (no parallel codepath)
 
@@ -289,7 +289,7 @@ recursion shape so it's not a duplicate kernel — just a
   - Add `assemble(::StarStencil, …)`, `update!(…, ::StarStencil, …)`.
   - `build(::StarStencil, …)` falls out of the existing generic
     `build(st, row, col)` (already polymorphic).
-- `src/CartesianOperators.jl`: add `StarStencil` to the `export` list.
+- `src/StencilAssembly.jl`: add `StarStencil` to the `export` list.
 - `test/test_stencil.jl`: append `@testset "StarStencil …"` blocks
   (see below). Re-uses existing `stencil_reference` and the
   `using FillArrays, SparseArrays, StaticArrays: SUnitRange` imports.
@@ -370,7 +370,7 @@ add them to mirror LinearStencil's coverage.
 
 ## Verification
 
-1. Static: `julia --project=. -e 'using CartesianOperators'` loads without
+1. Static: `julia --project=. -e 'using StencilAssembly'` loads without
    warning.
 2. `julia --project=. -e 'using Pkg; Pkg.test()'` — all existing
    LinearStencil testsets remain green, new StarStencil testsets pass.

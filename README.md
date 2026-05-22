@@ -1,6 +1,6 @@
-# CartesianOperators
+# StencilAssembly
 
-[![Build Status](https://github.com/vlc1/CartesianOperators.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/vlc1/CartesianOperators.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![Build Status](https://github.com/vlc1/StencilAssembly.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/vlc1/StencilAssembly.jl/actions/workflows/CI.yml?query=branch%3Amain)
 
 Julia package that assembles `SparseMatrixCSC` operators for stencil patterns
 on rectangular Cartesian meshes. Row and column index sets are
@@ -11,12 +11,12 @@ fill are exposed as separate operations, both allocation-free, so the
 fill can be re-run cheaply inside an outer iterative solver.
 
 The stencil **types** live in [StencilCore](../StencilCore) (shared with the
-symbolic CAS [GridAlgebra](../GridAlgebra)); this package depends on it and
+symbolic CAS [StencilCalculus](../StencilCalculus)); this package depends on it and
 provides the CSC **assembly**. Clone the three repos side by side — they
 resolve each other through relative `[sources]` paths.
 
 ```julia
-using CartesianOperators, FillArrays
+using StencilAssembly, FillArrays
 using StaticArrays: SUnitRange, SVector
 
 row = (1:4,); col = (1:4,)
@@ -56,7 +56,7 @@ middle slot. Unlike a per-axis decomposition, the diagonal is a *free*
 coefficient — so Helmholtz (`k²`) and parabolic (`∂ₜ`) terms have a home.
 
 ```julia
-using CartesianOperators
+using StencilAssembly
 using StaticArrays: SVector
 
 n1, n2 = 5, 4
@@ -116,11 +116,11 @@ the kernels.
 Implemented: CSC assembly for `LinearStencil` (any `1 ≤ D ≤ N`) and the
 interlaced `StarStencil` (any `N ≥ 1`), default `ColumnAccess`; 1-D, 2-D, 3-D
 coverage against a brute-force oracle, plus the `Stencil`-narrowing path from
-[GridAlgebra](../GridAlgebra). Next: a CSR assembler activating the `RowAccess`
+[StencilCalculus](../StencilCalculus). Next: a CSR assembler activating the `RowAccess`
 path, then stencil composition.
 
 See [`AGENTS.md`](AGENTS.md) for the CSC assembly invariants and
 [`../StencilCore/AGENTS.md`](../StencilCore/AGENTS.md) for the type vocabulary.
-The symbolic-CAS design is [`docs/cas.md`](docs/cas.md); the package-split
-design is [`docs/core.md`](docs/core.md). (`docs/plan.md` / `docs/star.md` /
+The symbolic-CAS design is [`docs/cas.md`](../StencilCalculus/docs/cas.md); the package-split
+design is [`docs/core.md`](../StencilCore/docs/core.md). (`docs/plan.md` / `docs/star.md` /
 `docs/term.md` are earlier per-feature plans, partly superseded.)

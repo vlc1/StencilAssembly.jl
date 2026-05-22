@@ -4,7 +4,7 @@
 #
 #     julia --project=. test/oracle.jl
 
-using CartesianOperators
+using StencilAssembly
 using FillArrays
 using SparseArrays
 using StaticArrays: SUnitRange

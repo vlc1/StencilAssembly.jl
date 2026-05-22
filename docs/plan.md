@@ -1,4 +1,4 @@
-# CartesianOperators implementation plan
+# StencilAssembly implementation plan
 
 Forward-looking. Reflects the move from arbitrary `NTuple{K, Int}`
 offsets to contiguous `SUnitRange{O, L}` and the rewrite of the 1-D

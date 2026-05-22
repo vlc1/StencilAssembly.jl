@@ -5,7 +5,7 @@ vocabulary* (`AccessStyle`, `AbstractStencil`, `AbstractTerm`,
 `StaticPair`/`StaticShift`, `LinearStencil`, `StarStencil`, `Stencil`,
 `as_linear`/`as_star`) is owned by **StencilCore** —
 see [`../StencilCore/AGENTS.md`](../StencilCore/AGENTS.md). The symbolic CAS
-that feeds these stencils is [`docs/cas.md`](docs/cas.md). Status:
+that feeds these stencils is [`docs/cas.md`](../StencilCalculus/docs/cas.md). Status:
 [`docs/plan.md`](docs/plan.md); per-feature: [`docs/star.md`](docs/star.md).
 
 This package depends on StencilCore (via a `[sources]` path until it is
