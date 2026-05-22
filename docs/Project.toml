@@ -1,0 +1,11 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+StencilAssembly = "9490c4af-147d-4721-8d2a-1e2bdce723b1"
+StencilCore = "a74cdc4b-3eb6-46ad-ac2b-692b37b57e71"
+
+[sources]
+StencilAssembly = {path = ".."}
+StencilCore = {path = "../../StencilCore"}
+
+[compat]
+Documenter = "1"

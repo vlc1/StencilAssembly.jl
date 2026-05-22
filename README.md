@@ -1,6 +1,7 @@
 # StencilAssembly
 
 [![Build Status](https://github.com/vlc1/StencilAssembly.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/vlc1/StencilAssembly.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://vlc1.github.io/StencilAssembly.jl/dev/)
 
 Julia package that assembles `SparseMatrixCSC` operators for stencil patterns
 on rectangular Cartesian meshes. Row and column index sets are
