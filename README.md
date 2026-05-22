@@ -10,6 +10,11 @@ and row `i`, the diagonal is `k = j − i`. Sparsity pattern and numerical
 fill are exposed as separate operations, both allocation-free, so the
 fill can be re-run cheaply inside an outer iterative solver.
 
+The stencil **types** live in [StencilCore](../StencilCore) (shared with the
+symbolic CAS [GridAlgebra](../GridAlgebra)); this package depends on it and
+provides the CSC **assembly**. Clone the three repos side by side — they
+resolve each other through relative `[sources]` paths.
+
 ```julia
 using CartesianOperators, FillArrays
 using StaticArrays: SUnitRange, SVector
@@ -44,28 +49,27 @@ array can precompute quantities shared across that column's offsets.
 
 ## N-D star-shaped operators
 
-`StarStencil{L}` packages N axis-aligned 1-D stencils with symmetric reach
-`−L … +L` into a single assembly pass. The canonical example is the
-variable-coefficient Laplacian.
+`StarStencil{L}` is an N-D star with symmetric reach `−L … +L` per axis,
+stored **interlaced**: one `SVector{M}` per cell (`M = 2NL + 1`) holding the
+whole star in reverse-lex offset order, with the diagonal as the explicit
+middle slot. Unlike a per-axis decomposition, the diagonal is a *free*
+coefficient — so Helmholtz (`k²`) and parabolic (`∂ₜ`) terms have a home.
 
 ```julia
-using CartesianOperators, FillArrays
+using CartesianOperators
 using StaticArrays: SVector
 
 n1, n2 = 5, 4
-# 2-D Laplacian-shape on a 5×4 mesh; per-axis stencil (−1, 2, −1) with L = 1.
-# One SVector{2L+1} per axis per column.
-terms = (
-    Fill(SVector(-1.0, 2.0, -1.0), n1, n2),  # axis 1
-    Fill(SVector(-1.0, 2.0, -1.0), n1, n2),  # axis 2
-)
-lap = StarStencil{1}(terms)
+# 2-D negative Laplacian on a 5×4 mesh (L = 1 ⇒ M = 2·2·1 + 1 = 5).
+# Reverse-lex order: (axis2,−1), (axis1,−1), diagonal, (axis1,+1), (axis2,+1).
+coef = fill(SVector(-1.0, -1.0, 4.0, -1.0, -1.0), n1, n2)
+lap  = StarStencil{1}(coef)
 J = build(lap, (1:n1, 1:n2), (1:n1, 1:n2))
 ```
 
-Per-axis offset `δ_d = 0` contributions are summed into a single CSC
-entry on the diagonal: `A[r, r] = Σ_d terms[d][c][L + 1]`. The kernel
-carries a per-axis guard `2L ≤ length(row[d])`.
+The diagonal slot is set directly (here `4`); the kernel walks each column's
+`SVector` in reverse-lex (CSC) order and carries a per-axis guard
+`2L ≤ length(row[d])`.
 
 ## Three operations
 
@@ -109,13 +113,14 @@ the kernels.
 
 ## Status
 
-Implemented: `LinearStencil` (any `1 ≤ D ≤ N`) and `StarStencil` (any
-`N ≥ 1`), default `ColumnAccess`; 1-D, 2-D, 3-D test coverage against a
-brute-force oracle. Next: CSR assembler activating the `RowAccess` path,
-then composition (sum / product of stencils).
+Implemented: CSC assembly for `LinearStencil` (any `1 ≤ D ≤ N`) and the
+interlaced `StarStencil` (any `N ≥ 1`), default `ColumnAccess`; 1-D, 2-D, 3-D
+coverage against a brute-force oracle, plus the `Stencil`-narrowing path from
+[GridAlgebra](../GridAlgebra). Next: a CSR assembler activating the `RowAccess`
+path, then stencil composition.
 
-See [`AGENTS.md`](AGENTS.md) for sticky design decisions and
-[`docs/`](docs/) for per-feature plans
-([`docs/plan.md`](docs/plan.md), [`docs/star.md`](docs/star.md),
-[`docs/term.md`](docs/term.md)). Historical design rationale:
-[`docs/superpowers/specs/2026-05-12-cartesian-operators-design.md`](docs/superpowers/specs/2026-05-12-cartesian-operators-design.md).
+See [`AGENTS.md`](AGENTS.md) for the CSC assembly invariants and
+[`../StencilCore/AGENTS.md`](../StencilCore/AGENTS.md) for the type vocabulary.
+The symbolic-CAS design is [`docs/cas.md`](docs/cas.md); the package-split
+design is [`docs/core.md`](docs/core.md). (`docs/plan.md` / `docs/star.md` /
+`docs/term.md` are earlier per-feature plans, partly superseded.)
