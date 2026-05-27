@@ -6,36 +6,36 @@
 # via `_as_linear` (the 1-D layout coincides with `LinearStencil`'s).
 
 """
-    _as_linear(st::StarStencil{L, 1, M, E, A, S}) -> LinearStencil{1, …, S}
+    _as_linear(st::StarStencil{L, 1, M, T, A, S}) -> LinearStencil{1, …, S}
 
 Convert a 1-D `StarStencil` to the equivalent `LinearStencil{1}` with offsets
 `−L … +L` and the same coefficient. The 1-D interlaced layout is already the
 ascending-offset `SVector` a `LinearStencil` expects, so the coefficient is
 reused verbatim. Preserves the access style.
 """
-_as_linear(st::StarStencil{L, 1, M, E, A, S}) where {L, M, E, A, S} =
+_as_linear(st::StarStencil{L, 1, M, T, A, S}) where {L, M, T, A, S} =
     LinearStencil{1}(S, SUnitRange(-L, L), st.term)
 
 """
-    assemble(st::StarStencil{L, 1, M, SVector{M, T}, A, ColumnAccess}, row, col) -> SparseMatrixCSC{T, Int}
+    assemble(st::StarStencil{L, 1, M, T, A, ColumnAccess}, row, col) -> SparseMatrixCSC{T, Int}
 
 1-D `StarStencil` assembly delegates to the equivalent `LinearStencil{1}`.
 """
 assemble(
-    st::StarStencil{L, 1, M, SVector{M, T}, A, ColumnAccess},
+    st::StarStencil{L, 1, M, T, A, ColumnAccess},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
 ) where {L, M, T, A<:AbstractArray{SVector{M, T}, 1}} =
     assemble(_as_linear(st), row, col)
 
 """
-    update!(mat, st::StarStencil{L, 1, M, SVector{M, T}, A, ColumnAccess}, row, col) -> mat
+    update!(mat, st::StarStencil{L, 1, M, T, A, ColumnAccess}, row, col) -> mat
 
 1-D `StarStencil` update delegates to the equivalent `LinearStencil{1}`.
 """
 update!(
     mat::SparseMatrixCSC{T, Int},
-    st::StarStencil{L, 1, M, SVector{M, T}, A, ColumnAccess},
+    st::StarStencil{L, 1, M, T, A, ColumnAccess},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
 ) where {L, T, M, A<:AbstractArray{SVector{M, T}, 1}} =
@@ -66,14 +66,14 @@ end
 end
 
 """
-    assemble(st::StarStencil{L, N, M, SVector{M, T}, A, ColumnAccess}, row, col) -> SparseMatrixCSC{T, Int}
+    assemble(st::StarStencil{L, N, M, T, A, ColumnAccess}, row, col) -> SparseMatrixCSC{T, Int}
 
 N-D entry (`N ≥ 2`, `S = ColumnAccess`). Enforces the per-axis guard
 `2L ≤ length(row[d])`. Builds `colptr` / `rowval` and allocates uninitialised
 `nzval`; call [`update!`](@ref) to populate, or use [`build`](@ref).
 """
 function assemble(
-    st::StarStencil{L, N, M, SVector{M, T}, A, ColumnAccess},
+    st::StarStencil{L, N, M, T, A, ColumnAccess},
     row::NTuple{N, AbstractUnitRange{Int}},
     col::NTuple{N, AbstractUnitRange{Int}},
 ) where {L, N, M, T, A<:AbstractArray{SVector{M, T}, N}}
@@ -87,14 +87,14 @@ function assemble(
 end
 
 """
-    update!(mat, st::StarStencil{L, N, M, SVector{M, T}, A, ColumnAccess}, row, col) -> mat
+    update!(mat, st::StarStencil{L, N, M, T, A, ColumnAccess}, row, col) -> mat
 
 N-D in-place value update (`N ≥ 2`, `S = ColumnAccess`); same guard as
 [`assemble`](@ref). `mat` must come from a matching `assemble`.
 """
 function update!(
     mat::SparseMatrixCSC{T, Int},
-    st::StarStencil{L, N, M, SVector{M, T}, A, ColumnAccess},
+    st::StarStencil{L, N, M, T, A, ColumnAccess},
     row::NTuple{N, AbstractUnitRange{Int}},
     col::NTuple{N, AbstractUnitRange{Int}},
 ) where {L, T, N, M, A<:AbstractArray{SVector{M, T}, N}}

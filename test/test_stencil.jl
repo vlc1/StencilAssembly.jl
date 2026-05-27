@@ -607,7 +607,7 @@ end
         terms = (Fill(1.0, n), Fill(-4.0, n), Fill(3.0, n))
         st = Stencil(ColumnAccess, (-2ê₁, -ê₁, ô), terms)
         ln = as_linear(st)
-        @test ln isa LinearStencil{1, -2, 3, SVector{3, Float64}, <:Any, ColumnAccess}
+        @test ln isa LinearStencil{1, -2, 3, Float64, <:Any, ColumnAccess}
         ref = fill(SVector(1.0, -4.0, 3.0), n)
         @test ln.term == ref
         @test build(ln, (1:n,), (1:n,)) ==
@@ -620,7 +620,7 @@ end
                  Fill(-1.0, n1, n2), Fill(-1.0, n1, n2))
         st = Stencil(ColumnAccess, (-ê₂, -ê₁, ô, ê₁, ê₂), terms)
         ss = as_star(st)
-        @test ss isa StarStencil{1, 2, 5, SVector{5, Float64}, <:Any, ColumnAccess}
+        @test ss isa StarStencil{1, 2, 5, Float64, <:Any, ColumnAccess}
         ref = fill(SVector(-1.0, -1.0, 4.0, -1.0, -1.0), n1, n2)
         @test ss.term == ref
         @test build(ss, (1:n1, 1:n2), (1:n1, 1:n2)) ==

@@ -178,7 +178,7 @@ function _fill!(
 end
 
 """
-    assemble(st::LinearStencil{1, O, L, SVector{L, T}, A, ColumnAccess},
+    assemble(st::LinearStencil{1, O, L, T, A, ColumnAccess},
              row::NTuple{1, AbstractUnitRange{Int}},
              col::NTuple{1, AbstractUnitRange{Int}}) -> SparseMatrixCSC{T, Int}
 
@@ -196,7 +196,7 @@ Dispatch pins `D = 1`, `N = 1`, and `S = ColumnAccess` (misuse →
 kernel's exact correctness boundary.
 """
 function assemble(
-    st::LinearStencil{1, O, L, SVector{L, T}, A, ColumnAccess},
+    st::LinearStencil{1, O, L, T, A, ColumnAccess},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
 ) where {O, L, T, A<:AbstractArray{SVector{L, T}, 1}}
@@ -214,7 +214,7 @@ end
 
 """
     update!(mat::SparseMatrixCSC{T, Int},
-            st::LinearStencil{1, O, L, SVector{L, T}, A, ColumnAccess},
+            st::LinearStencil{1, O, L, T, A, ColumnAccess},
             row::NTuple{1, AbstractUnitRange{Int}},
             col::NTuple{1, AbstractUnitRange{Int}}) -> mat
 
@@ -225,7 +225,7 @@ same `L − 1 ≤ length(row[1])` guard.
 """
 function update!(
     mat::SparseMatrixCSC{T, Int},
-    st::LinearStencil{1, O, L, SVector{L, T}, A, ColumnAccess},
+    st::LinearStencil{1, O, L, T, A, ColumnAccess},
     row::NTuple{1, AbstractUnitRange{Int}},
     col::NTuple{1, AbstractUnitRange{Int}},
 ) where {T, O, L, A<:AbstractArray{SVector{L, T}, 1}}
@@ -252,7 +252,7 @@ end
 end
 
 function assemble(
-    st::LinearStencil{D, O, L, SVector{L, T}, A, ColumnAccess},
+    st::LinearStencil{D, O, L, T, A, ColumnAccess},
     row::NTuple{N, AbstractUnitRange{Int}},
     col::NTuple{N, AbstractUnitRange{Int}},
 ) where {D, O, L, T, N, A<:AbstractArray{SVector{L, T}, N}}
@@ -272,7 +272,7 @@ end
 
 function update!(
     mat::SparseMatrixCSC{T, Int},
-    st::LinearStencil{D, O, L, SVector{L, T}, A, ColumnAccess},
+    st::LinearStencil{D, O, L, T, A, ColumnAccess},
     row::NTuple{N, AbstractUnitRange{Int}},
     col::NTuple{N, AbstractUnitRange{Int}},
 ) where {D, O, L, T, N, A<:AbstractArray{SVector{L, T}, N}}
