@@ -1,6 +1,6 @@
 using StencilAssembly
 using StencilAssembly: _pattern!, _fill!
-using StencilCore: ô, ê₁, ê₂
+using StencilCore: NeighborhoodStencil, ô, ê₁, ê₂
 using FillArrays
 using SparseArrays
 using StaticArrays: SUnitRange, SVector
@@ -549,14 +549,14 @@ end
         @test AccessStyle(st_lin) === ColumnAccess()
         @test AccessStyle(typeof(st_lin)) === ColumnAccess()
         @test st_lin isa AbstractStencil
-        @test st_lin isa AbstractStencil{ColumnAccess}
+        @test st_lin isa NeighborhoodStencil{Float64, ColumnAccess}
 
         term = Fill(SVector(-1.0, 2.0, -1.0), 5)
         st_star = StarStencil{1}(term)
         @test AccessStyle(st_star) === ColumnAccess()
         @test AccessStyle(typeof(st_star)) === ColumnAccess()
         @test st_star isa AbstractStencil
-        @test st_star isa AbstractStencil{ColumnAccess}
+        @test st_star isa NeighborhoodStencil{Float64, ColumnAccess}
     end
 
     @testset "explicit ColumnAccess ctor" begin
@@ -572,14 +572,14 @@ end
         st_lin = LinearStencil{1}(RowAccess, SUnitRange(0, 1),
                                   Fill(SVector(-1.0, 1.0), 5))
         @test AccessStyle(st_lin) === RowAccess()
-        @test st_lin isa AbstractStencil{RowAccess}
+        @test st_lin isa NeighborhoodStencil{Float64, RowAccess}
         @test_throws MethodError assemble(st_lin, (1:5,), (1:5,))
         @test_throws MethodError build(st_lin, (1:5,), (1:5,))
 
         term = Fill(SVector(-1.0, 2.0, -1.0), 5)
         st_star = StarStencil{1}(RowAccess, term)
         @test AccessStyle(st_star) === RowAccess()
-        @test st_star isa AbstractStencil{RowAccess}
+        @test st_star isa NeighborhoodStencil{Float64, RowAccess}
         @test_throws MethodError assemble(st_star, (1:5,), (1:5,))
         @test_throws MethodError build(st_star, (1:5,), (1:5,))
     end
